@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EV 전비 최적 내비게이션</title>
+<link rel="stylesheet" href="/static/vendor/leaflet.css">
+<style>
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --border: rgba(11,11,11,0.10);
+    --series-fastest: #2a78d6;  /* categorical slot 1: blue */
+    --series-eco: #1baf7a;      /* categorical slot 2: aqua */
+    --delta-good: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --border: rgba(255,255,255,0.10);
+      --series-fastest: #3987e5;
+      --series-eco: #199e70;
+      --delta-good: #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body.viz-root {
+    margin: 0; height: 100vh; display: flex;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--text-primary);
+  }
+  #map { flex: 1; height: 100%; }
+  #panel {
+    width: 340px; padding: 16px; overflow-y: auto;
+    background: var(--surface-1); border-left: 1px solid var(--border);
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
+  select, button {
+    width: 100%; padding: 8px; font-size: 13px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+  }
+  button { cursor: pointer; margin-top: 12px; }
+  .route-card {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-top: 12px;
+  }
+  .route-card .name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 18px; height: 4px; border-radius: 2px; display: inline-block; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .tile .v { font-size: 18px; font-weight: 650; }
+  .tile .k { font-size: 11px; color: var(--text-muted); }
+  #saving { margin-top: 14px; font-size: 13px; color: var(--text-secondary); }
+  #saving .big { color: var(--delta-good); font-weight: 650; }
+  #status { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+</style>
+</head>
+<body class="viz-root">
+<div id="map"></div>
+<div id="panel">
+  <h1>EV 전비 최적 내비게이션</h1>
+  <p class="hint">지도를 클릭해 출발지 → 도착지를 지정하세요. (데모: 서울 강남 일대 샘플 도로망)</p>
+
+  <label for="vehicle">차종</label>
+  <select id="vehicle"></select>
+
+  <label for="hour">출발 시각</label>
+  <select id="hour"></select>
+
+  <button id="reset">초기화</button>
+
+  <div id="results" hidden>
+    <div class="route-card">
+      <div class="name"><span class="swatch" style="background:var(--series-eco)"></span>전비 최적 경로</div>
+      <div class="tiles" id="eco-tiles"></div>
+    </div>
+    <div class="route-card">
+      <div class="name"><span class="swatch" style="background:var(--series-fastest)"></span>최소 시간 경로</div>
+      <div class="tiles" id="fast-tiles"></div>
+    </div>
+    <div id="saving"></div>
+  </div>
+  <div id="status"></div>
+</div>
+
+<script src="/static/vendor/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([37.51, 127.045], 14);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+}).addTo(map);
+
+const state = { start: null, end: null, layers: [] };
+const $ = (id) => document.getElementById(id);
+
+const hourSel = $('hour');
+for (let h = 0; h < 24; h++) {
+  const opt = new Option(`${String(h).padStart(2, '0')}:00`, h, false, h === 8);
+  hourSel.add(opt);
+}
+
+fetch('/api/vehicles').then(r => r.json()).then(list => {
+  for (const v of list) $('vehicle').add(new Option(v.name, v.id));
+});
+
+function clearLayers() {
+  state.layers.forEach(l => map.removeLayer(l));
+  state.layers = [];
+}
+
+function reset() {
+  state.start = state.end = null;
+  clearLayers();
+  $('results').hidden = true;
+  $('status').textContent = '';
+}
+$('reset').onclick = reset;
+
+function marker(latlng, label) {
+  const m = L.marker(latlng).addTo(map).bindTooltip(label, { permanent: true, direction: 'top' });
+  state.layers.push(m);
+  return m;
+}
+
+map.on('click', (e) => {
+  if (!state.start) {
+    reset();
+    state.start = e.latlng;
+    marker(e.latlng, '출발');
+  } else if (!state.end) {
+    state.end = e.latlng;
+    marker(e.latlng, '도착');
+    requestRoute();
+  }
+});
+
+$('vehicle').onchange = $('hour').onchange = () => {
+  if (state.start && state.end) requestRoute();
+};
+
+function tiles(el, r) {
+  el.innerHTML = `
+    <div class="tile"><div class="v">${r.energy_kwh}</div><div class="k">kWh 소비</div></div>
+    <div class="tile"><div class="v">${r.time_min}</div><div class="k">분 소요</div></div>
+    <div class="tile"><div class="v">${r.distance_km}</div><div class="k">km 거리</div></div>
+    <div class="tile"><div class="v">${r.efficiency_km_per_kwh.toFixed(1)}</div><div class="k">km/kWh 전비</div></div>`;
+}
+
+async function requestRoute() {
+  clearLayersExceptMarkers();
+  $('status').textContent = '경로 계산 중…';
+  const q = new URLSearchParams({
+    start_lat: state.start.lat, start_lon: state.start.lng,
+    end_lat: state.end.lat, end_lon: state.end.lng,
+    hour: hourSel.value, vehicle: $('vehicle').value,
+  });
+  const resp = await fetch(`/api/route?${q}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    $('status').textContent = `오류: ${err.detail || resp.status}`;
+    return;
+  }
+  const data = await resp.json();
+  draw(data);
+}
+
+function clearLayersExceptMarkers() {
+  state.layers = state.layers.filter(l => {
+    if (l instanceof L.Polyline && !(l instanceof L.Polygon)) { map.removeLayer(l); return false; }
+    return true;
+  });
+}
+
+function draw(data) {
+  const css = getComputedStyle(document.body);
+  const toLatLngs = (r) => r.coordinates.map(c => [c.lat, c.lon]);
+
+  const fast = L.polyline(toLatLngs(data.fastest), {
+    color: css.getPropertyValue('--series-fastest').trim(), weight: 5, opacity: 0.9,
+  }).addTo(map);
+  const eco = L.polyline(toLatLngs(data.eco), {
+    color: css.getPropertyValue('--series-eco').trim(), weight: 5, opacity: 0.9, dashArray: '10 6',
+  }).addTo(map);
+  state.layers.push(fast, eco);
+  map.fitBounds(L.featureGroup([fast, eco]).getBounds().pad(0.15));
+
+  tiles($('eco-tiles'), data.eco);
+  tiles($('fast-tiles'), data.fastest);
+
+  const s = data.saving;
+  $('saving').innerHTML = s.energy_wh > 0
+    ? `전비 최적 경로 선택 시 <span class="big">${s.energy_wh} Wh (${s.energy_pct}%)</span> 절약,
+       추가 소요 ${s.extra_time_min}분`
+    : `이 구간은 최소 시간 경로가 곧 전비 최적 경로입니다.`;
+  $('results').hidden = false;
+  $('status').textContent = `${data.vehicle.name} · ${data.hour}시 출발 기준`;
+}
+</script>
+</body>
+</html>
