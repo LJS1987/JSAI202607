@@ -38,17 +38,36 @@
   }
   #map { flex: 1; height: 100%; }
   #panel {
-    width: 340px; padding: 16px; overflow-y: auto;
+    width: 360px; padding: 16px; overflow-y: auto;
     background: var(--surface-1); border-left: 1px solid var(--border);
   }
   h1 { font-size: 16px; margin: 0 0 4px; }
-  .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+  h2 { font-size: 13px; margin: 16px 0 6px; color: var(--text-secondary); }
+  .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; }
   label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
-  select, button {
+  select, button, input[type=text] {
     width: 100%; padding: 8px; font-size: 13px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
   }
-  button { cursor: pointer; margin-top: 12px; }
+  button { cursor: pointer; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .chip {
+    display: inline-block; font-size: 12px; padding: 4px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-secondary); margin-top: 6px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tabs { display: flex; gap: 0; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .tabs button { border: none; border-radius: 0; background: var(--page); color: var(--text-muted); }
+  .tabs button.active { background: var(--surface-1); color: var(--text-primary); font-weight: 600; }
+  #search-results { list-style: none; margin: 6px 0 0; padding: 0; max-height: 180px; overflow-y: auto; }
+  #search-results li {
+    padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 4px;
+    cursor: pointer; font-size: 13px;
+  }
+  #search-results li:hover { background: var(--page); }
+  #search-results .addr { display: block; font-size: 11px; color: var(--text-muted); }
+  #search-results .cat { font-size: 11px; color: var(--text-muted); float: right; }
   .route-card {
     border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; margin-top: 12px;
@@ -60,6 +79,8 @@
   .tile .k { font-size: 11px; color: var(--text-muted); }
   #saving { margin-top: 14px; font-size: 13px; color: var(--text-secondary); }
   #saving .big { color: var(--delta-good); font-weight: 650; }
+  #warnings { font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
+  #warnings div::before { content: "⚠ "; }
   #status { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
 </style>
 </head>
@@ -67,15 +88,41 @@
 <div id="map"></div>
 <div id="panel">
   <h1>EV 전비 최적 내비게이션</h1>
-  <p class="hint">지도를 클릭해 출발지 → 도착지를 지정하세요. (데모: 서울 강남 일대 샘플 도로망)</p>
+  <p class="hint">데모 도로망: 서울 강남 일대. 지도 클릭으로도 출발지/도착지를 바꿀 수 있습니다.</p>
 
-  <label for="vehicle">차종</label>
-  <select id="vehicle"></select>
+  <h2>출발지</h2>
+  <button id="geolocate">📍 현재 위치 사용</button>
+  <span class="chip" id="start-label">미지정 — 버튼을 누르거나 지도를 클릭하세요</span>
 
-  <label for="hour">출발 시각</label>
-  <select id="hour"></select>
+  <h2>도착지</h2>
+  <div class="tabs">
+    <button id="tab-search" class="active">통합검색</button>
+    <button id="tab-addr">주소로 찾기</button>
+  </div>
+  <div id="pane-search">
+    <input type="text" id="search-input" placeholder="장소·역·지역 검색 (예: 코엑스, 선릉역)" autocomplete="off">
+    <ul id="search-results"></ul>
+  </div>
+  <div id="pane-addr" hidden>
+    <label for="sido">시/도</label>
+    <select id="sido"></select>
+    <label for="sigungu">시/군/구</label>
+    <select id="sigungu"></select>
+  </div>
+  <span class="chip" id="end-label">미지정</span>
 
-  <button id="reset">초기화</button>
+  <h2>옵션</h2>
+  <div class="row">
+    <div>
+      <label for="vehicle">차종</label>
+      <select id="vehicle"></select>
+    </div>
+    <div>
+      <label for="hour">출발 시각</label>
+      <select id="hour"></select>
+    </div>
+  </div>
+  <button id="reset" style="margin-top:12px">초기화</button>
 
   <div id="results" hidden>
     <div class="route-card">
@@ -88,64 +135,154 @@
     </div>
     <div id="saving"></div>
   </div>
+  <div id="warnings"></div>
   <div id="status"></div>
 </div>
 
 <script src="/static/vendor/leaflet.js"></script>
 <script>
-const map = L.map('map').setView([37.51, 127.045], 14);
+const DEFAULT_CENTER = [37.51, 127.045];
+const map = L.map('map').setView(DEFAULT_CENTER, 14);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors',
 }).addTo(map);
 
-const state = { start: null, end: null, layers: [] };
 const $ = (id) => document.getElementById(id);
+const state = {
+  start: null, end: null,             // {lat, lng, label}
+  startMarker: null, endMarker: null,
+  routeLines: [],
+};
 
+// ---- 옵션 셀렉트 ----
 const hourSel = $('hour');
 for (let h = 0; h < 24; h++) {
-  const opt = new Option(`${String(h).padStart(2, '0')}:00`, h, false, h === 8);
-  hourSel.add(opt);
+  hourSel.add(new Option(`${String(h).padStart(2, '0')}:00`, h, false, h === 8));
 }
-
 fetch('/api/vehicles').then(r => r.json()).then(list => {
   for (const v of list) $('vehicle').add(new Option(v.name, v.id));
 });
 
-function clearLayers() {
-  state.layers.forEach(l => map.removeLayer(l));
-  state.layers = [];
-}
-
-function reset() {
-  state.start = state.end = null;
-  clearLayers();
-  $('results').hidden = true;
-  $('status').textContent = '';
-}
-$('reset').onclick = reset;
-
-function marker(latlng, label) {
-  const m = L.marker(latlng).addTo(map).bindTooltip(label, { permanent: true, direction: 'top' });
-  state.layers.push(m);
-  return m;
-}
-
-map.on('click', (e) => {
-  if (!state.start) {
-    reset();
-    state.start = e.latlng;
-    marker(e.latlng, '출발');
-  } else if (!state.end) {
-    state.end = e.latlng;
-    marker(e.latlng, '도착');
-    requestRoute();
+// ---- 출발지: 현재 위치 ----
+$('geolocate').onclick = () => {
+  if (!navigator.geolocation) {
+    $('status').textContent = '이 브라우저는 위치 정보를 지원하지 않습니다. 지도를 클릭해 주세요.';
+    return;
   }
-});
-
-$('vehicle').onchange = $('hour').onchange = () => {
-  if (state.start && state.end) requestRoute();
+  $('status').textContent = '현재 위치 확인 중…';
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      setStart({ lat: pos.coords.latitude, lng: pos.coords.longitude }, '현재 위치');
+      $('status').textContent = '';
+    },
+    (err) => {
+      $('status').textContent = `위치를 가져올 수 없습니다 (${err.message}). 지도를 클릭해 출발지를 지정하세요.`;
+    },
+    { enableHighAccuracy: true, timeout: 8000 },
+  );
 };
 
+// ---- 도착지: 탭 전환 ----
+function showTab(which) {
+  $('tab-search').classList.toggle('active', which === 'search');
+  $('tab-addr').classList.toggle('active', which === 'addr');
+  $('pane-search').hidden = which !== 'search';
+  $('pane-addr').hidden = which !== 'addr';
+}
+$('tab-search').onclick = () => showTab('search');
+$('tab-addr').onclick = () => showTab('addr');
+
+// ---- 통합검색 (debounce) ----
+let searchTimer = null;
+$('search-input').addEventListener('input', (e) => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  if (!q) { $('search-results').innerHTML = ''; return; }
+  searchTimer = setTimeout(async () => {
+    const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    if (!resp.ok) return;
+    const items = await resp.json();
+    $('search-results').innerHTML = items.length ? '' : '<li>검색 결과가 없습니다</li>';
+    for (const it of items) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="cat">${it.category || ''}</span>${it.name}<span class="addr">${it.address || ''}</span>`;
+      li.onclick = () => {
+        setEnd({ lat: it.lat, lng: it.lon }, it.name);
+        $('search-results').innerHTML = '';
+        $('search-input').value = it.name;
+      };
+      $('search-results').appendChild(li);
+    }
+  }, 250);
+});
+
+// ---- 주소(시/도 → 시/군/구) ----
+let regions = {};
+fetch('/api/regions').then(r => r.json()).then(data => {
+  regions = data;
+  const sidoSel = $('sido');
+  sidoSel.add(new Option('선택하세요', ''));
+  for (const sido of Object.keys(regions)) sidoSel.add(new Option(sido, sido));
+});
+$('sido').onchange = () => {
+  const sel = $('sigungu');
+  sel.innerHTML = '';
+  const sido = $('sido').value;
+  if (!sido) return;
+  sel.add(new Option('선택하세요', ''));
+  for (const gu of Object.keys(regions[sido].districts)) sel.add(new Option(gu, gu));
+};
+$('sigungu').onchange = () => {
+  const sido = $('sido').value, gu = $('sigungu').value;
+  if (!sido || !gu) return;
+  const d = regions[sido].districts[gu];
+  setEnd({ lat: d.lat, lng: d.lon }, `${sido} ${gu}`);
+};
+
+// ---- 지도 클릭: 출발지 없으면 출발지, 있으면 도착지 갱신 ----
+map.on('click', (e) => {
+  if (!state.start) setStart(e.latlng, '지도에서 선택');
+  else setEnd(e.latlng, '지도에서 선택');
+});
+
+// ---- 상태 갱신 ----
+function setMarker(existing, latlng, label) {
+  if (existing) map.removeLayer(existing);
+  return L.marker(latlng).addTo(map).bindTooltip(label, { permanent: true, direction: 'top' });
+}
+function setStart(latlng, label) {
+  state.start = { ...latlng, label };
+  state.startMarker = setMarker(state.startMarker, latlng, `출발: ${label}`);
+  $('start-label').textContent = `${label} (${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)})`;
+  maybeRoute();
+}
+function setEnd(latlng, label) {
+  state.end = { ...latlng, label };
+  state.endMarker = setMarker(state.endMarker, latlng, `도착: ${label}`);
+  $('end-label').textContent = `${label} (${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)})`;
+  maybeRoute();
+}
+function maybeRoute() {
+  if (state.start && state.end) requestRoute();
+}
+$('vehicle').onchange = hourSel.onchange = maybeRoute;
+
+$('reset').onclick = () => {
+  for (const l of [...state.routeLines, state.startMarker, state.endMarker]) {
+    if (l) map.removeLayer(l);
+  }
+  Object.assign(state, { start: null, end: null, startMarker: null, endMarker: null, routeLines: [] });
+  $('start-label').textContent = '미지정 — 버튼을 누르거나 지도를 클릭하세요';
+  $('end-label').textContent = '미지정';
+  $('search-input').value = '';
+  $('search-results').innerHTML = '';
+  $('results').hidden = true;
+  $('warnings').innerHTML = '';
+  $('status').textContent = '';
+  map.setView(DEFAULT_CENTER, 14);
+};
+
+// ---- 경로 요청·표시 ----
 function tiles(el, r) {
   el.innerHTML = `
     <div class="tile"><div class="v">${r.energy_kwh}</div><div class="k">kWh 소비</div></div>
@@ -155,7 +292,8 @@ function tiles(el, r) {
 }
 
 async function requestRoute() {
-  clearLayersExceptMarkers();
+  state.routeLines.forEach(l => map.removeLayer(l));
+  state.routeLines = [];
   $('status').textContent = '경로 계산 중…';
   const q = new URLSearchParams({
     start_lat: state.start.lat, start_lon: state.start.lng,
@@ -168,15 +306,7 @@ async function requestRoute() {
     $('status').textContent = `오류: ${err.detail || resp.status}`;
     return;
   }
-  const data = await resp.json();
-  draw(data);
-}
-
-function clearLayersExceptMarkers() {
-  state.layers = state.layers.filter(l => {
-    if (l instanceof L.Polyline && !(l instanceof L.Polygon)) { map.removeLayer(l); return false; }
-    return true;
-  });
+  draw(await resp.json());
 }
 
 function draw(data) {
@@ -189,8 +319,8 @@ function draw(data) {
   const eco = L.polyline(toLatLngs(data.eco), {
     color: css.getPropertyValue('--series-eco').trim(), weight: 5, opacity: 0.9, dashArray: '10 6',
   }).addTo(map);
-  state.layers.push(fast, eco);
-  map.fitBounds(L.featureGroup([fast, eco]).getBounds().pad(0.15));
+  state.routeLines = [fast, eco];
+  map.fitBounds(L.featureGroup([fast, eco, state.startMarker, state.endMarker]).getBounds().pad(0.15));
 
   tiles($('eco-tiles'), data.eco);
   tiles($('fast-tiles'), data.fastest);
@@ -200,6 +330,7 @@ function draw(data) {
     ? `전비 최적 경로 선택 시 <span class="big">${s.energy_wh} Wh (${s.energy_pct}%)</span> 절약,
        추가 소요 ${s.extra_time_min}분`
     : `이 구간은 최소 시간 경로가 곧 전비 최적 경로입니다.`;
+  $('warnings').innerHTML = (data.warnings || []).map(w => `<div>${w}</div>`).join('');
   $('results').hidden = false;
   $('status').textContent = `${data.vehicle.name} · ${data.hour}시 출발 기준`;
 }

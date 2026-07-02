@@ -23,6 +23,36 @@ import os
 import httpx
 
 ITS_TRAFFIC_URL = "https://openapi.its.go.kr:9443/trafficInfo"
+KAKAO_LOCAL_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+
+
+async def search_kakao_places(query: str, limit: int = 10) -> list[dict] | None:
+    """카카오 로컬 키워드 검색 → [{name, address, lat, lon, category}].
+
+    KAKAO_REST_API_KEY 미설정 시 None 을 반환해 places.search_local 의
+    내장 데이터 검색으로 폴백한다.
+    """
+    api_key = os.environ.get("KAKAO_REST_API_KEY")
+    if not api_key:
+        return None
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(
+            KAKAO_LOCAL_URL,
+            params={"query": query, "size": limit},
+            headers={"Authorization": f"KakaoAK {api_key}"},
+        )
+        resp.raise_for_status()
+        docs = resp.json().get("documents", [])
+    return [
+        {
+            "name": d["place_name"],
+            "address": d.get("road_address_name") or d.get("address_name", ""),
+            "lat": float(d["y"]),
+            "lon": float(d["x"]),
+            "category": "장소",
+        }
+        for d in docs
+    ]
 
 
 async def fetch_its_link_speeds(

@@ -11,10 +11,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .graph import Graph
+from .graph import Graph, haversine_m
+from .places import search_local
+from .providers import search_kakao_places
+from .regions import REGIONS
 from .routing import NoRouteError, RouteResult, find_route
 from .sample_data import ensure_sample_graph
 from .vehicles import DEFAULT_VEHICLE_ID, PRESETS
+
+# 요청 지점이 도로망에서 이보다 멀면 커버리지 밖 경고를 붙인다
+COVERAGE_WARN_M = 1_500.0
 
 ROOT = Path(__file__).resolve().parents[2]
 GRAPH_PATH = ROOT / "backend" / "data" / "sample_graph.json"
@@ -58,6 +64,40 @@ def _route_payload(graph: Graph, result: RouteResult) -> dict:
     }
 
 
+@app.get("/api/regions")
+def list_regions() -> dict:
+    """시/도 → 시/군/구 목록과 근사 중심 좌표 (주소 기반 목적지 선택용)."""
+    return {
+        sido: {
+            "lat": info["lat"],
+            "lon": info["lon"],
+            "districts": {
+                gu: {"lat": lat, "lon": lon}
+                for gu, (lat, lon) in info["districts"].items()
+            },
+        }
+        for sido, info in REGIONS.items()
+    }
+
+
+@app.get("/api/search")
+async def search(q: str = Query(..., min_length=1), limit: int = Query(10, le=20)) -> list[dict]:
+    """통합검색: 카카오 로컬 API(키 설정 시) → 내장 POI·행정구역 폴백."""
+    kakao = await search_kakao_places(q, limit)
+    if kakao is not None:
+        return kakao
+    return [
+        {
+            "name": p.name,
+            "address": p.address,
+            "lat": p.lat,
+            "lon": p.lon,
+            "category": p.category,
+        }
+        for p in search_local(q, limit)
+    ]
+
+
 @app.get("/api/vehicles")
 def list_vehicles() -> list[dict]:
     return [
@@ -86,6 +126,18 @@ def route(
     if start.id == goal.id:
         raise HTTPException(400, "출발지와 도착지가 같은 교차로입니다")
 
+    warnings: list[str] = []
+    for label, lat, lon, node in (
+        ("출발지", start_lat, start_lon, start),
+        ("도착지", end_lat, end_lon, goal),
+    ):
+        gap_m = haversine_m(lat, lon, node.lat, node.lon)
+        if gap_m > COVERAGE_WARN_M:
+            warnings.append(
+                f"{label}가 데모 도로망(강남 일대)에서 {gap_m / 1000:.1f}km 밖이라 "
+                f"가장 가까운 도로망 지점으로 안내합니다"
+            )
+
     try:
         eco = find_route(graph, ev, start.id, goal.id, hour, mode="eco")
         fastest = find_route(graph, ev, start.id, goal.id, hour, mode="fastest")
@@ -96,6 +148,7 @@ def route(
     return {
         "vehicle": {"id": ev.id, "name": ev.name, "battery_kwh": ev.battery_kwh},
         "hour": hour,
+        "warnings": warnings,
         "eco": _route_payload(graph, eco),
         "fastest": _route_payload(graph, fastest),
         "saving": {

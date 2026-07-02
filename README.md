@@ -15,8 +15,11 @@ uvicorn backend.app.main:app --reload
 # 브라우저에서 http://localhost:8000 접속
 ```
 
-지도를 클릭해 출발지 → 도착지를 지정하면 두 경로가 그려집니다.
-차종(아이오닉5/EV6/모델3/레이EV)과 출발 시각을 바꾸면 결과가 갱신됩니다.
+- **출발지**: `현재 위치 사용` 버튼(브라우저 Geolocation) 또는 지도 클릭
+- **도착지**: 통합검색(장소·역·지역 키워드) 또는 주소로 찾기(시/도 → 시/군/구 선택)
+- 차종(아이오닉5/EV6/모델3/레이EV)과 출발 시각을 바꾸면 결과가 즉시 갱신됩니다.
+- 데모 도로망(강남 일대) 밖의 목적지를 고르면 가장 가까운 도로망 지점으로
+  안내하며 경고를 표시합니다.
 첫 실행 시 서울 강남 일대를 근사한 샘플 도로망(`backend/data/sample_graph.json`)이
 자동 생성됩니다.
 
@@ -62,7 +65,9 @@ python -m pytest backend/tests
 
 | 엔드포인트 | 설명 |
 |---|---|
-| `GET /api/route?start_lat&start_lon&end_lat&end_lon&hour&vehicle` | 전비 최적 + 최소 시간 경로 비교 |
+| `GET /api/route?start_lat&start_lon&end_lat&end_lon&hour&vehicle` | 전비 최적 + 최소 시간 경로 비교 (커버리지 경고 포함) |
+| `GET /api/search?q=` | 통합검색 — 카카오 로컬 API(`KAKAO_REST_API_KEY` 설정 시) → 내장 POI·행정구역 폴백 |
+| `GET /api/regions` | 시/도 → 시/군/구 목록과 근사 중심 좌표 |
 | `GET /api/vehicles` | 차종 프리셋 목록 |
 | `GET /` | 지도 UI |
 
@@ -75,6 +80,7 @@ python -m pytest backend/tests
 |---|---|---|
 | 전국 도로망 | OpenStreetMap 한국 추출본 (`providers.load_osm_graph`, osmnx) 또는 표준노드링크 | 로더 구현됨 (osmnx 옵션) |
 | 실시간 소통 속도 | 국가교통정보센터 ITS 오픈 API (`providers.fetch_its_link_speeds`), 서울 TOPIS | 커넥터 구현, 키 필요 |
+| 장소 검색(지오코딩) | 카카오 로컬 API (`providers.search_kakao_places`) | 커넥터 구현, 키 없으면 내장 POI·시군구 폴백 |
 | 신호등 위치 | OSM `highway=traffic_signals` 태그 | 로더에 포함 |
 | 신호 주기 | 경찰청 신호운영 데이터(공공데이터포털) | 미연동 — 통계 기본값 사용 |
 | 고도(DEM) | 국토지리정보원 DEM, 브이월드 고도 API | 미연동 — 샘플 지형 사용 |
@@ -90,7 +96,9 @@ backend/
     graph.py       # 도로망 그래프 (노드=교차로, 엣지=링크)
     routing.py     # 전위 보정 다익스트라 (eco / fastest)
     sample_data.py # 강남 일대 샘플 도로망 생성기
-    providers.py   # ITS·TOPIS·OSM 실데이터 커넥터
+    regions.py     # 전국 시/도·시/군/구 근사 좌표 (주소 선택용)
+    places.py      # 통합검색 내장 POI + 로컬 검색
+    providers.py   # ITS·TOPIS·OSM·카카오 로컬 실데이터 커넥터
     vehicles.py    # 차종 물리 파라미터 프리셋
     main.py        # FastAPI 서버
   tests/           # 물리 타당성·경로 최적성 테스트
