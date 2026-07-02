@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "서버 실행",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m uvicorn backend.app.main:app --reload --port 8000",
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "테스트 실행",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m pytest backend/tests -v",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "의존성 설치",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m pip install -r requirements.txt",
+      "problemMatcher": []
+    }
+  ]
+}
