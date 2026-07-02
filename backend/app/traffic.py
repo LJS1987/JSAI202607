@@ -45,8 +45,19 @@ SIGNAL_PROFILES: dict[str, SignalProfile] = {
 }
 
 
+def normalize_road_class(road_class: str) -> str:
+    """OSM highway 태그를 내부 등급으로 정규화 (motorway_link → motorway 등)."""
+    base = road_class.removesuffix("_link")
+    if base in ROAD_CLASS_SPEED_KMH:
+        return base
+    if base in ("unclassified", "living_street", "service"):
+        return "residential"
+    return "tertiary"
+
+
 def expected_speed_ms(road_class: str, hour: int) -> float:
     """도로 등급과 출발 시각(시)에 따른 기대 주행 속도(m/s)."""
+    road_class = normalize_road_class(road_class)
     base_kmh = ROAD_CLASS_SPEED_KMH.get(road_class, 40.0)
     factor = _HOURLY_FLOW_FACTOR[hour % 24]
     if road_class == "motorway":

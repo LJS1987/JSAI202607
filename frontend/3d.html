@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EV 전비 내비 — 3D 주행</title>
+<style>
+  :root {
+    --surface-1: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --border: rgba(255,255,255,0.10);
+    --series-eco: #199e70;
+    --series-fastest: #3987e5;
+    --status-good: #0ca30c;
+    --status-critical: #d03b3b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; overflow: hidden; background: #0d0d0d;
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text-primary); }
+  #scene { position: absolute; inset: 0; }
+  .hud {
+    position: absolute; background: rgba(26,26,25,0.88); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(4px);
+  }
+  #hud-main { left: 16px; top: 16px; width: 240px; }
+  #hud-main .speed { font-size: 40px; font-weight: 700; line-height: 1; }
+  #hud-main .speed small { font-size: 13px; font-weight: 400; color: var(--text-muted); }
+  #hud-main .row { display: flex; justify-content: space-between; font-size: 12px;
+                   color: var(--text-secondary); margin-top: 6px; }
+  #hud-main .row b { color: var(--text-primary); font-weight: 600; }
+  #glosa-banner {
+    left: 50%; transform: translateX(-50%); top: 16px; font-size: 15px; font-weight: 600;
+    display: none; align-items: center; gap: 8px;
+  }
+  #glosa-banner .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  #signal-hud { right: 16px; top: 16px; font-size: 13px; color: var(--text-secondary); min-width: 170px; }
+  #signal-hud .light { width: 14px; height: 14px; border-radius: 50%; display: inline-block;
+                       vertical-align: -2px; margin-right: 6px; }
+  #controls { left: 16px; bottom: 16px; display: flex; gap: 8px; align-items: center; }
+  #controls button, #controls a {
+    padding: 8px 12px; font-size: 13px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+    text-decoration: none;
+  }
+  #controls .active { border-color: var(--series-eco); color: var(--series-eco); }
+  #done { left: 50%; top: 50%; transform: translate(-50%,-50%); text-align: center;
+          display: none; font-size: 15px; }
+  #done .big { font-size: 26px; font-weight: 700; color: var(--series-eco); margin-bottom: 6px; }
+  #loading { left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 14px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+
+<div class="hud" id="hud-main">
+  <div class="speed"><span id="speed">0</span> <small>km/h</small></div>
+  <div class="row"><span>소비 에너지</span><b id="energy">0 Wh</b></div>
+  <div class="row"><span>남은 거리</span><b id="remain">- km</b></div>
+  <div class="row"><span>경과 시간</span><b id="elapsed">0:00</b></div>
+  <div class="row"><span>GLOSA 절약</span><b id="saved" style="color:var(--series-eco)">0 Wh</b></div>
+</div>
+
+<div class="hud" id="glosa-banner">
+  <span class="dot" style="background:var(--status-good)"></span>
+  <span id="glosa-text"></span>
+</div>
+
+<div class="hud" id="signal-hud">
+  <div style="color:var(--text-muted); font-size:11px; margin-bottom:4px">다음 신호</div>
+  <div><span class="light" id="sig-light" style="background:#444"></span><span id="sig-text">없음</span></div>
+</div>
+
+<div class="hud" id="controls">
+  <button id="play">⏸ 일시정지</button>
+  <button id="x1" class="active">1×</button>
+  <button id="x5">5×</button>
+  <button id="x20">20×</button>
+  <button id="cam">📷 버드뷰</button>
+  <a href="/">← 2D 지도</a>
+</div>
+
+<div class="hud" id="done">
+  <div class="big">도착!</div>
+  <div id="done-stats"></div>
+</div>
+
+<div class="hud" id="loading">3D 도로망 불러오는 중…</div>
+
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.min.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const css = getComputedStyle(document.documentElement);
+const COLOR = {
+  eco: css.getPropertyValue('--series-eco').trim(),
+  fastest: css.getPropertyValue('--series-fastest').trim(),
+  good: css.getPropertyValue('--status-good').trim(),
+  critical: css.getPropertyValue('--status-critical').trim(),
+};
+const ROAD_STYLE = {
+  motorway:    { w: 24, c: 0x55555f },
+  trunk:       { w: 20, c: 0x4f4f58 },
+  primary:     { w: 18, c: 0x4a4a52 },
+  secondary:   { w: 13, c: 0x44444b },
+  tertiary:    { w: 10, c: 0x3e3e44 },
+  residential: { w: 7,  c: 0x38383d },
+};
+const ELEV_SCALE = 2.5;                 // 고도 과장 배율 (시각화용)
+const $ = (id) => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+
+// 기본 데모: 강남역 → 코엑스
+const params = {
+  start_lat: qs.get('start_lat') ?? 37.4979, start_lon: qs.get('start_lon') ?? 127.0276,
+  end_lat: qs.get('end_lat') ?? 37.5115, end_lon: qs.get('end_lon') ?? 127.0595,
+  hour: qs.get('hour') ?? 8, vehicle: qs.get('vehicle') ?? 'ioniq5',
+  signal_mode: 'sim',
+};
+
+const [network, routeData] = await Promise.all([
+  fetch('/api/network').then(r => r.json()),
+  fetch('/api/route?' + new URLSearchParams(params)).then(r => r.json()),
+]);
+$('loading').style.display = 'none';
+
+// ---- 좌표계: 도로망 중심 기준 로컬 미터 (x=동, z=남, y=고도) ----
+const lats = Object.values(network.nodes).map(n => n.lat);
+const lons = Object.values(network.nodes).map(n => n.lon);
+const lat0 = (Math.min(...lats) + Math.max(...lats)) / 2;
+const lon0 = (Math.min(...lons) + Math.max(...lons)) / 2;
+const M_LAT = 111320, M_LON = 111320 * Math.cos(lat0 * Math.PI / 180);
+const toXYZ = (n) => new THREE.Vector3(
+  (n.lon - lon0) * M_LON, (n.elev ?? 0) * ELEV_SCALE, -(n.lat - lat0) * M_LAT);
+
+// ---- 장면 ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+$('scene').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d0d);
+scene.fog = new THREE.Fog(0x0d0d0d, 1500, 5200);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 1, 12000);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+sun.position.set(900, 1400, 600);
+scene.add(sun);
+
+// 지면
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(12000, 12000),
+  new THREE.MeshLambertMaterial({ color: 0x151517 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -2;
+scene.add(ground);
+
+// ---- 도로 리본 (엣지마다 박스) ----
+function roadSegment(a, b, width, color, y_lift) {
+  const dir = b.clone().sub(a);
+  const len = dir.length();
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(width, 1.2, len),
+    new THREE.MeshLambertMaterial({ color }));
+  mesh.position.copy(a.clone().add(b).multiplyScalar(0.5));
+  mesh.position.y += y_lift;
+  mesh.lookAt(b.clone().setY(b.y + y_lift));
+  return mesh;
+}
+const seen = new Set();
+for (const e of network.edges) {
+  const key = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from;
+  if (seen.has(key)) continue;  // 양방향 중복 제거
+  seen.add(key);
+  const st = ROAD_STYLE[e.road_class] ?? ROAD_STYLE.tertiary;
+  scene.add(roadSegment(toXYZ(network.nodes[e.from]), toXYZ(network.nodes[e.to]), st.w, st.c, 0));
+}
+
+// ---- 경로 리본 ----
+function routeRibbon(route, color, width, lift) {
+  const group = new THREE.Group();
+  const pts = route.coordinates.map(c => {
+    const node = { lat: c.lat, lon: c.lon, elev: nearestElev(c) };
+    return toXYZ(node);
+  });
+  for (let i = 0; i < pts.length - 1; i++)
+    group.add(roadSegment(pts[i], pts[i + 1], width, color, lift));
+  scene.add(group);
+  return pts;
+}
+function nearestElev(c) {
+  let best = 0, bd = Infinity;
+  for (const n of Object.values(network.nodes)) {
+    const d = (n.lat - c.lat) ** 2 + (n.lon - c.lon) ** 2;
+    if (d < bd) { bd = d; best = n.elev ?? 0; }
+  }
+  return best;
+}
+routeRibbon(routeData.fastest, new THREE.Color(COLOR.fastest), 4, 1.4);
+const routePts = routeRibbon(routeData.eco, new THREE.Color(COLOR.eco), 6, 2.0);
+
+// ---- 신호등 (폴 + 등) ----
+const signalLights = [];  // {mesh, timing}
+const poleGeo = new THREE.CylinderGeometry(0.8, 0.8, 14, 6);
+const poleMat = new THREE.MeshLambertMaterial({ color: 0x4a4a4a });
+const lampGeo = new THREE.SphereGeometry(3.2, 12, 12);
+for (const [id, n] of Object.entries(network.nodes)) {
+  if (!n.timing) continue;
+  const base = toXYZ(n);
+  const pole = new THREE.Mesh(poleGeo, poleMat);
+  pole.position.copy(base).y += 7;
+  const lamp = new THREE.Mesh(lampGeo,
+    new THREE.MeshBasicMaterial({ color: 0x555555 }));
+  lamp.position.copy(base).y += 15;
+  scene.add(pole, lamp);
+  signalLights.push({ id, lamp, timing: n.timing });
+}
+function signalColorAt(timing, t) {
+  const phase = ((t - timing.offset_s) % timing.cycle_s + timing.cycle_s) % timing.cycle_s;
+  return phase < timing.green_s
+    ? { color: 'green', remaining: timing.green_s - phase }
+    : { color: 'red', remaining: timing.cycle_s - phase };
+}
+
+// ---- 차량 ----
+const car = new THREE.Group();
+const body = new THREE.Mesh(new THREE.BoxGeometry(9, 3.2, 20),
+  new THREE.MeshLambertMaterial({ color: 0xe8e8ee }));
+body.position.y = 3;
+const cabin = new THREE.Mesh(new THREE.BoxGeometry(7.5, 2.6, 10),
+  new THREE.MeshLambertMaterial({ color: 0x2a2a30 }));
+cabin.position.set(0, 5.6, -1);
+car.add(body, cabin);
+scene.add(car);
+
+// ---- 주행 타임라인 (GLOSA 반영) ----
+// 안내 스팬(leg_start..leg_end)에 속한 구간은 권장 속도로 감속 주행하고
+// 스팬 끝 신호는 무정차 통과. 그 외 구간은 원속도 주행 후 확정 대기.
+const advisories = routeData.glosa?.advisories ?? [];
+const legAdv = new Array(routeData.eco.legs.length).fill(null);
+for (const a of advisories)
+  for (let k = a.leg_start; k <= a.leg_end; k++) legAdv[k] = a;
+const legs = routeData.eco.legs.map((leg, i) => {
+  const adv = legAdv[i];
+  const speed_ms = (adv ? adv.advisory_kmh : leg.speed_kmh) / 3.6;
+  return {
+    ...leg, i, adv,
+    isAdvEnd: !!adv && i === adv.leg_end,
+    speed_ms,
+    drive_s: leg.length_m / speed_ms,
+    wait_s: adv ? 0 : leg.wait_s,
+  };
+});
+const totalDist = legs.reduce((s, l) => s + l.length_m, 0);
+const totalTime = legs.reduce((s, l) => s + l.drive_s + l.wait_s, 0);
+const t0 = Number(params.hour) * 3600;
+
+// simT(출발 후 초) → {pos, dir, speed, legIdx, distDone, energyDone, waiting}
+function stateAt(simT) {
+  let t = 0, dist = 0, energy = 0;
+  for (const leg of legs) {
+    const a = routePts[leg.i], b = routePts[leg.i + 1];
+    const advSaved = leg.isAdvEnd ? leg.adv.saved_wh : 0;
+    if (simT < t + leg.drive_s) {
+      const f = (simT - t) / leg.drive_s;
+      return {
+        pos: a.clone().lerp(b, f),
+        dir: b.clone().sub(a).setY(0).normalize(),
+        speed: leg.speed_ms, leg,
+        distDone: dist + leg.length_m * f,
+        energyDone: energy + (leg.energy_wh - advSaved) * f,
+        waiting: false, done: false,
+      };
+    }
+    t += leg.drive_s;
+    if (simT < t + leg.wait_s) {
+      return {
+        pos: b.clone(), dir: b.clone().sub(a).setY(0).normalize(),
+        speed: 0, leg, distDone: dist + leg.length_m,
+        energyDone: energy + leg.energy_wh - advSaved,
+        waiting: true, done: false,
+      };
+    }
+    t += leg.wait_s;
+    dist += leg.length_m;
+    energy += leg.energy_wh - advSaved;
+  }
+  const last = legs[legs.length - 1];
+  return { pos: routePts[routePts.length - 1].clone(),
+           dir: new THREE.Vector3(0, 0, -1), speed: 0, leg: last,
+           distDone: dist, energyDone: energy, waiting: false, done: true };
+}
+
+// ---- 컨트롤 ----
+let simT = 0, mult = 1, playing = true, chase = true;
+$('play').onclick = () => { playing = !playing; $('play').textContent = playing ? '⏸ 일시정지' : '▶ 재생'; };
+for (const [id, m] of [['x1', 1], ['x5', 5], ['x20', 20]]) {
+  $(id).onclick = () => {
+    mult = m;
+    for (const b of ['x1', 'x5', 'x20']) $(b).classList.toggle('active', b === id);
+  };
+}
+$('cam').onclick = () => { chase = !chase; $('cam').textContent = chase ? '📷 버드뷰' : '📷 체이스'; };
+
+// ---- HUD ----
+const totalSaved = routeData.glosa?.saved_wh ?? 0;
+function updateHUD(st) {
+  $('speed').textContent = Math.round(st.speed * 3.6);
+  $('energy').textContent = `${st.energyDone.toFixed(0)} Wh`;
+  $('remain').textContent = `${((totalDist - st.distDone) / 1000).toFixed(2)} km`;
+  const m = Math.floor(simT / 60), s = Math.floor(simT % 60);
+  $('elapsed').textContent = `${m}:${String(s).padStart(2, '0')}`;
+  $('saved').textContent = `${totalSaved} Wh`;
+
+  // 다음 신호 + GLOSA 배너
+  let next = null;
+  for (let i = st.leg.i; i < legs.length; i++) {
+    const nid = legs[i].to;
+    const sig = signalLights.find(s => s.id === nid);
+    if (sig) { next = { sig, legIdx: i }; break; }
+  }
+  if (next) {
+    const s = signalColorAt(next.sig.timing, t0 + simT);
+    $('sig-light').style.background = s.color === 'green' ? COLOR.good : COLOR.critical;
+    $('sig-text').textContent = `${s.color === 'green' ? '녹색' : '적색'} · ${Math.ceil(s.remaining)}초 남음`;
+  } else {
+    $('sig-light').style.background = '#444';
+    $('sig-text').textContent = '없음';
+  }
+  const adv = st.leg.adv;
+  if (adv && !st.done) {
+    $('glosa-banner').style.display = 'flex';
+    $('glosa-text').textContent =
+      `GLOSA: ${adv.advisory_kmh}km/h 유지 시 무정차 통과 (+${adv.saved_wh}Wh 절약)`;
+  } else if (st.waiting) {
+    $('glosa-banner').style.display = 'flex';
+    $('glosa-text').textContent = '신호 대기 중…';
+  } else {
+    $('glosa-banner').style.display = 'none';
+  }
+}
+
+// ---- 루프 ----
+const clock = new THREE.Clock();
+const camPos = new THREE.Vector3(0, 400, 400);
+let finished = false;
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  if (playing && !finished) simT += dt * mult;
+  const st = stateAt(simT);
+
+  car.position.copy(st.pos);
+  if (st.dir.lengthSq() > 0) {
+    const target = st.pos.clone().add(st.dir);
+    car.lookAt(target.setY(car.position.y));
+  }
+
+  for (const s of signalLights) {
+    const state = signalColorAt(s.timing, t0 + simT);
+    s.lamp.material.color.set(state.color === 'green' ? COLOR.good : COLOR.critical);
+  }
+
+  const wanted = chase
+    ? st.pos.clone().sub(st.dir.clone().multiplyScalar(70)).add(new THREE.Vector3(0, 32, 0))
+    : st.pos.clone().add(new THREE.Vector3(0, 700, 260));
+  camPos.lerp(wanted, Math.min(1, dt * 2.5));
+  camera.position.copy(camPos);
+  camera.lookAt(st.pos.clone().add(st.dir.clone().multiplyScalar(chase ? 60 : 0)));
+
+  updateHUD(st);
+  if (st.done && !finished) {
+    finished = true;
+    $('done').style.display = 'block';
+    $('done-stats').innerHTML =
+      `${(totalDist / 1000).toFixed(2)} km · ${Math.round(totalTime / 60)}분 · ` +
+      `${st.energyDone.toFixed(0)} Wh 소비` +
+      (totalSaved > 0 ? `<br>GLOSA 로 ${totalSaved} Wh 절약` : '');
+  }
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

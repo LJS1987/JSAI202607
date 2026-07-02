@@ -87,14 +87,17 @@ async def fetch_its_link_speeds(
     }
 
 
-def load_osm_graph(place: str):
+def load_osm_graph(place: str, dem_path: str | None = None):
     """OpenStreetMap 실도로망 로더 (osmnx 설치 시 사용 가능).
 
     사용 예:
         graph = load_osm_graph("Gangnam-gu, Seoul, South Korea")
 
-    osmnx 가 신호등 노드(highway=traffic_signals)와 도로 등급을 함께
-    제공하므로 graph.Graph 형식으로 변환해 반환한다.
+    - 신호등: highway=traffic_signals 노드. 간선(primary 이상)이 지나는
+      교차로는 "major", 나머지는 "minor" 신호로 분류한다.
+    - 고도: dem_path(GeoTIFF, 국토지리정보원 DEM 또는 SRTM)를 주면
+      osmnx 로 노드 고도를 채운다. 없으면 0 (평지 가정).
+    - 일방통행은 osmnx 방향 그래프가 이미 반영한다.
     """
     try:
         import osmnx as ox
@@ -104,11 +107,38 @@ def load_osm_graph(place: str):
         ) from exc
 
     from .graph import Graph, Node, Edge
+    from .traffic import normalize_road_class
 
     g = ox.graph_from_place(place, network_type="drive")
+    if dem_path:
+        g = ox.elevation.add_node_elevations_raster(g, dem_path)
+
+    # 노드별 최고 도로 등급을 먼저 파악해 신호 규모 분류에 사용
+    majors = {"motorway", "trunk", "primary", "secondary"}
+    node_has_major: set = set()
+    edges: list[Edge] = []
+    for u, v, attrs in g.edges(data=True):
+        highway = attrs.get("highway", "tertiary")
+        if isinstance(highway, list):
+            highway = highway[0]
+        road_class = normalize_road_class(str(highway))
+        if road_class in majors:
+            node_has_major.update((u, v))
+        edges.append(
+            Edge(
+                from_id=str(u),
+                to_id=str(v),
+                length_m=float(attrs.get("length", 0.0)),
+                road_class=road_class,
+            )
+        )
+
     graph = Graph()
     for osm_id, attrs in g.nodes(data=True):
-        signal = "minor" if attrs.get("highway") == "traffic_signals" else "none"
+        if attrs.get("highway") == "traffic_signals":
+            signal = "major" if osm_id in node_has_major else "minor"
+        else:
+            signal = "none"
         graph.add_node(
             Node(
                 id=str(osm_id),
@@ -118,16 +148,21 @@ def load_osm_graph(place: str):
                 signal=signal,
             )
         )
-    for u, v, attrs in g.edges(data=True):
-        highway = attrs.get("highway", "tertiary")
-        if isinstance(highway, list):
-            highway = highway[0]
-        graph.add_edge(
-            Edge(
-                from_id=str(u),
-                to_id=str(v),
-                length_m=float(attrs.get("length", 0.0)),
-                road_class=str(highway),
-            )
-        )
+    for edge in edges:
+        graph.add_edge(edge)
     return graph
+
+
+def graph_to_json(graph) -> dict:
+    """Graph → sample_graph.json 과 동일한 직렬화 형식."""
+    return {
+        "nodes": {
+            n.id: {"lat": n.lat, "lon": n.lon, "elev": n.elev_m, "signal": n.signal}
+            for n in graph.nodes.values()
+        },
+        "edges": [
+            {"from": e.from_id, "to": e.to_id, "length": e.length_m, "road_class": e.road_class}
+            for adj in graph.adjacency.values()
+            for e in adj
+        ],
+    }

@@ -134,6 +134,15 @@
       <div class="tiles" id="fast-tiles"></div>
     </div>
     <div id="saving"></div>
+    <div class="route-card" id="glosa-card" hidden>
+      <div class="name">🚦 GLOSA 신호 연동 안내</div>
+      <div id="glosa-summary" style="font-size:12px; color:var(--text-secondary); margin-top:6px"></div>
+    </div>
+    <a id="view3d" href="/3d" style="display:block; text-align:center; margin-top:12px;
+       padding:9px; border:1px solid var(--border); border-radius:6px;
+       color:var(--text-primary); text-decoration:none; font-size:13px; font-weight:600">
+      🚗 3D 주행 시뮬레이션 보기
+    </a>
   </div>
   <div id="warnings"></div>
   <div id="status"></div>
@@ -331,6 +340,27 @@ function draw(data) {
        추가 소요 ${s.extra_time_min}분`
     : `이 구간은 최소 시간 경로가 곧 전비 최적 경로입니다.`;
   $('warnings').innerHTML = (data.warnings || []).map(w => `<div>${w}</div>`).join('');
+
+  if (data.glosa && data.glosa.advisories.length) {
+    const g = data.glosa;
+    $('glosa-card').hidden = false;
+    $('glosa-summary').innerHTML =
+      `신호 ${g.advisories.length}곳에서 감속 안내로 정차 회피 →
+       <b style="color:var(--delta-good)">${g.saved_wh} Wh 추가 절약</b>
+       (안내 준수 시 총 ${g.energy_kwh_if_followed} kWh)<br>` +
+      g.advisories.slice(0, 4).map(a =>
+        `· ${a.original_kmh}→<b>${a.advisory_kmh}km/h</b> 감속, 대기 ${a.wait_avoided_s}초 회피`
+      ).join('<br>');
+  } else {
+    $('glosa-card').hidden = true;
+  }
+
+  $('view3d').href = '/3d?' + new URLSearchParams({
+    start_lat: state.start.lat, start_lon: state.start.lng,
+    end_lat: state.end.lat, end_lon: state.end.lng,
+    hour: hourSel.value, vehicle: $('vehicle').value,
+  });
+
   $('results').hidden = false;
   $('status').textContent = `${data.vehicle.name} · ${data.hour}시 출발 기준`;
 }
