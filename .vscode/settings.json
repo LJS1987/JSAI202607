@@ -1,0 +1,10 @@
+{
+  // 커밋 버튼 하나로 스테이징(add)까지 자동 처리
+  "git.enableSmartCommit": true,
+  // 커밋이 끝나면 자동으로 push + pull (클라우드 동기화)
+  "git.postCommitCommand": "sync",
+  // 동기화할 때 확인 창 띄우지 않기
+  "git.confirmSync": false,
+  // 클라우드의 새 변경 사항을 주기적으로 자동 확인
+  "git.autofetch": true
+}
