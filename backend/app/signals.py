@@ -36,9 +36,20 @@ class SignalState:
 
 
 class SignalSimulator:
-    """노드 ID 기반 결정적 가상 신호. 같은 입력이면 항상 같은 현시."""
+    """노드 ID 기반 결정적 가상 신호. 같은 입력이면 항상 같은 현시.
+
+    real_timings 를 주면 해당 노드는 가상 시뮬레이션 대신 실측 타이밍을
+    사용한다 (경찰청 신호운영 데이터 연동, providers.fetch_police_signal_timings
+    참고). 실데이터가 없는 노드는 기존 결정적 시뮬레이션으로 폴백한다.
+    """
+
+    def __init__(self, real_timings: dict[str, SignalTiming] | None = None):
+        self.real_timings = real_timings or {}
 
     def timing_for(self, node: Node) -> SignalTiming | None:
+        real = self.real_timings.get(node.id)
+        if real is not None:
+            return real
         if node.signal not in _TIMING_BASE:
             return None
         cycle, green_ratio = _TIMING_BASE[node.signal]

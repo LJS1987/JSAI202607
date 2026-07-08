@@ -62,6 +62,24 @@ class Graph:
             key=lambda n: haversine_m(lat, lon, n.lat, n.lon),
         )
 
+    def nearest_signal_node(
+        self, lat: float, lon: float, max_dist_m: float
+    ) -> tuple[Node, float] | None:
+        """주어진 좌표에서 max_dist_m 이내 가장 가까운 신호 노드와 그 거리.
+
+        경찰청 실측 데이터(providers.py)·개인 GPS 로그(main.py)를 그래프의
+        신호 노드에 매칭하는 공통 로직.
+        """
+        best: Node | None = None
+        best_dist = max_dist_m
+        for node in self.nodes.values():
+            if node.signal == "none":
+                continue
+            dist = haversine_m(lat, lon, node.lat, node.lon)
+            if dist < best_dist:
+                best, best_dist = node, dist
+        return (best, best_dist) if best is not None else None
+
     @classmethod
     def from_json(cls, path: Path) -> "Graph":
         raw = json.loads(path.read_text(encoding="utf-8"))

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>실주행 GPS 기록 — EV 내비게이션</title>
+<link rel="stylesheet" href="/static/vendor/leaflet.css">
+<style>
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --border: rgba(11,11,11,0.10);
+    --series-eco: #1baf7a;
+    --status-good: #0ca30c;
+    --status-critical: #d6392a;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --border: rgba(255,255,255,0.10);
+      --series-eco: #199e70;
+      --status-good: #0ca30c;
+      --status-critical: #e35b4d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body.viz-root {
+    margin: 0; height: 100vh; display: flex;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--text-primary);
+  }
+  #map { flex: 1; height: 100%; }
+  #panel {
+    width: 320px; padding: 16px; overflow-y: auto;
+    background: var(--surface-1); border-left: 1px solid var(--border);
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+  label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
+  select, button {
+    width: 100%; padding: 9px; font-size: 13px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+  }
+  button { cursor: pointer; font-weight: 600; }
+  button#toggle.active { background: var(--status-critical); color: #fff; border-color: var(--status-critical); }
+  .tile {
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px;
+  }
+  .tile .k { font-size: 11px; color: var(--text-muted); }
+  .tile .v { font-size: 20px; font-weight: 650; margin-top: 2px; }
+  #ecospeed-tile .v { color: var(--series-eco); }
+  #status-line { font-size: 12px; color: var(--text-secondary); margin-top: 14px; }
+  a.back { display: block; margin-top: 16px; font-size: 12px; color: var(--text-muted); }
+</style>
+</head>
+<body class="viz-root">
+<div id="map"></div>
+<div id="panel">
+  <h1>📡 실주행 GPS 기록</h1>
+  <p class="hint">GPS를 켠 채로 실제 주행하면 신호 교차로 근처 위치만 서버에 기록됩니다.
+    쌓인 기록으로 신호 타이밍을 개인화 추정합니다(별도 재계산 필요).</p>
+
+  <label for="vehicle">차종</label>
+  <select id="vehicle"></select>
+
+  <div class="tile" id="ecospeed-tile">
+    <div class="k">연비 최적 속도 (선택 차종 기준)</div>
+    <div class="v" id="ecospeed">–</div>
+  </div>
+
+  <button id="toggle" style="margin-top:14px">기록 시작</button>
+
+  <div class="tile">
+    <div class="k">상태</div>
+    <div class="v" id="state-text" style="font-size:14px">대기 중</div>
+  </div>
+  <div class="tile">
+    <div class="k">기록 건수</div>
+    <div class="v" id="count">0</div>
+  </div>
+  <div id="status-line"></div>
+
+  <a class="back" href="/">← 경로 계획으로 돌아가기</a>
+</div>
+
+<script src="/static/vendor/leaflet.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const map = L.map('map').setView([37.51, 127.045], 15);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+}).addTo(map);
+
+let marker = null;
+let watchId = null;
+let count = 0;
+let vehicles = [];
+
+fetch('/api/vehicles').then(r => r.json()).then(list => {
+  vehicles = list;
+  for (const v of list) $('vehicle').add(new Option(v.name, v.id));
+  updateEcoSpeed();
+});
+$('vehicle').onchange = updateEcoSpeed;
+function updateEcoSpeed() {
+  const v = vehicles.find(v => v.id === $('vehicle').value);
+  $('ecospeed').textContent = v ? `${v.eco_speed_kmh} km/h` : '–';
+}
+
+function onFix(pos) {
+  const { latitude: lat, longitude: lon, speed } = pos.coords;
+  const speed_ms = speed ?? 0;
+  if (!marker) {
+    marker = L.marker([lat, lon]).addTo(map);
+  } else {
+    marker.setLatLng([lat, lon]);
+  }
+  map.panTo([lat, lon]);
+
+  fetch('/api/trip/ping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat, lon, speed_ms, ts: pos.timestamp / 1000 }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      count++;
+      $('count').textContent = count;
+      $('status-line').textContent = d.logged
+        ? `신호 ${d.node_id} 근처 (${d.dist_m}m) 기록됨`
+        : '도로망 신호 밖 — 기록 안 함';
+    })
+    .catch(() => { $('status-line').textContent = '서버 연결 실패'; });
+}
+
+$('toggle').onclick = () => {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    $('toggle').textContent = '기록 시작';
+    $('toggle').classList.remove('active');
+    $('state-text').textContent = '대기 중';
+    return;
+  }
+  if (!navigator.geolocation) {
+    $('state-text').textContent = '이 브라우저는 위치 정보를 지원하지 않습니다.';
+    return;
+  }
+  $('toggle').textContent = '기록 중지';
+  $('toggle').classList.add('active');
+  $('state-text').textContent = '주행 중';
+  watchId = navigator.geolocation.watchPosition(onFix, (err) => {
+    $('state-text').textContent = `위치 오류: ${err.message}`;
+  }, { enableHighAccuracy: true });
+};
+</script>
+</body>
+</html>

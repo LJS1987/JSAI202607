@@ -6,7 +6,7 @@ from backend.app.glosa import compute_advisories, min_advisory_ms
 from backend.app.graph import Edge, Graph, Node
 from backend.app.routing import find_route
 from backend.app.sample_data import build_sample_graph
-from backend.app.signals import SignalSimulator
+from backend.app.signals import SignalSimulator, SignalTiming
 from backend.app.vehicles import PRESETS
 
 IONIQ5 = PRESETS["ioniq5"]
@@ -57,6 +57,16 @@ def test_no_signal_node_never_waits():
     node = Node("x", 37.5, 127.0, 0, "none")
     assert SIM.timing_for(node) is None
     assert SIM.wait_at(node, 100.0) == 0.0
+
+
+def test_real_timing_overrides_simulation_for_matched_node():
+    """경찰청 실데이터가 있는 노드는 그 값을, 없는 노드는 기존 가상 시뮬레이션을 쓴다."""
+    real = SignalTiming(cycle_s=90.0, green_s=40.0, offset_s=5.0)
+    sim = SignalSimulator(real_timings={"x": real})
+    matched = Node("x", 37.5, 127.0, 0, "major")
+    unmatched = Node("y", 37.5, 127.0, 0, "major")
+    assert sim.timing_for(matched) == real
+    assert sim.timing_for(unmatched) == SIM.timing_for(unmatched)
 
 
 # ---- 시간 의존 라우팅 ----

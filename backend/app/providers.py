@@ -22,8 +22,22 @@ import os
 
 import httpx
 
+from .graph import Graph
+from .signals import SignalTiming
+
 ITS_TRAFFIC_URL = "https://openapi.its.go.kr:9443/trafficInfo"
 KAKAO_LOCAL_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+
+# 경찰청 교차로 정보 오픈API(공공데이터포털). 교차로 위치·명칭 조회
+# (getCrossRoadInfoList)는 데이터셋 문서에 공개돼 있어 확정이지만, 신호
+# 운영계획(주기·옵셋·현시별 시간) 오퍼레이션명은 포털의 상세 기술문서
+# (다운로드 시 로그인 필요)에만 있어 이 코드 작성 시점엔 확인하지 못했다.
+# 아래 POLICE_PLAN_OPERATION 은 같은 서비스의 특수일계획 오퍼레이션명
+# (getPlanCRHDInfo)에서 유추한 자리표시자이므로, 키 발급 후 받는 기술문서의
+# "교차로운영계획정보" 오퍼레이션명으로 반드시 확인/교체해야 한다.
+POLICE_CROSSROAD_URL = "http://apis.data.go.kr/1320000/CrossRoadInfoService/getCrossRoadInfoList"
+POLICE_PLAN_URL = "http://apis.data.go.kr/1320000/PlanCrossRoadInfoService"
+POLICE_PLAN_OPERATION = os.environ.get("POLICE_PLAN_OPERATION", "getPlanCRTodInfo")
 
 
 async def search_kakao_places(query: str, limit: int = 10) -> list[dict] | None:
@@ -85,6 +99,123 @@ async def fetch_its_link_speeds(
         for item in items
         if item.get("linkId") and item.get("speed")
     }
+
+
+def _response_body(resp: httpx.Response) -> dict:
+    """공공데이터포털 공통 응답 포맷({response:{body:{items:...}}} 또는 body 직결)에서 body 를 꺼낸다."""
+    payload = resp.json()
+    return payload.get("response", payload).get("body", {})
+
+
+def _response_items(body: dict) -> list[dict]:
+    items = body.get("items", []) or []
+    if isinstance(items, dict):
+        items = items.get("item", [])
+    return items
+
+
+async def _fetch_police_intersections(api_key: str, region_code: str) -> list[dict]:
+    """경찰청 교차로기반정보서비스 → [{int_no, name, lat, lon}] (지역코드 내 전체, 페이지네이션)."""
+    intersections: list[dict] = []
+    page = 1
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            resp = await client.get(
+                POLICE_CROSSROAD_URL,
+                params={
+                    "ServiceKey": api_key,
+                    "srchCTid": region_code,
+                    "pageNo": page,
+                    "numOfRows": 100,
+                    "type": "json",
+                },
+            )
+            resp.raise_for_status()
+            body = _response_body(resp)
+            items = _response_items(body)
+            for item in items:
+                intersections.append(
+                    {
+                        "int_no": str(item["INT_NO"]),
+                        "name": item.get("INT_NM", ""),
+                        "lat": float(item["Y_COORD"]),
+                        "lon": float(item["X_COORD"]),
+                    }
+                )
+            total = int(body.get("totalCount", len(intersections)))
+            if len(intersections) >= total or not items:
+                break
+            page += 1
+    return intersections
+
+
+async def _fetch_police_signal_plans(api_key: str, int_nos: list[str]) -> dict[str, SignalTiming]:
+    """경찰청 교차로운영계획정보 → {교차로번호: SignalTiming}.
+
+    POLICE_PLAN_OPERATION 오퍼레이션명과 아래 필드명(CYCLE/OFFSET/A_RING_*)은
+    공개 문서로 확정하지 못한 자리표시자다 — 실제 신청 후 발급되는 기술문서로
+    검증 후 필요하면 수정한다. 응답 형식이 다르면 이 함수만 교체하면 되고,
+    signals.SignalSimulator 와 호출부는 SignalTiming 인터페이스만 본다.
+    """
+    plans: dict[str, SignalTiming] = {}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for int_no in int_nos:
+            resp = await client.get(
+                f"{POLICE_PLAN_URL}/{POLICE_PLAN_OPERATION}",
+                params={"ServiceKey": api_key, "srchINTNo": int_no, "type": "json"},
+            )
+            if resp.status_code != 200:
+                continue
+            body = _response_body(resp)
+            items = _response_items(body)
+            if not items:
+                continue
+            item = items[0]
+            try:
+                cycle_s = float(item["CYCLE"])
+                offset_s = float(item["OFFSET"])
+                green_s = sum(
+                    float(item[f"A_RING_{i}"]) for i in range(1, 9) if item.get(f"A_RING_{i}")
+                )
+            except (KeyError, ValueError):
+                continue
+            if cycle_s <= 0 or green_s <= 0:
+                continue
+            plans[int_no] = SignalTiming(cycle_s=cycle_s, green_s=min(green_s, cycle_s), offset_s=offset_s)
+    return plans
+
+
+def _nearest_signal_node_id(graph: Graph, lat: float, lon: float, max_dist_m: float) -> str | None:
+    match = graph.nearest_signal_node(lat, lon, max_dist_m)
+    return match[0].id if match else None
+
+
+async def fetch_police_signal_timings(
+    graph: Graph, region_code: str, max_dist_m: float = 30.0
+) -> dict[str, SignalTiming]:
+    """경찰청 신호운영 데이터 → {그래프 노드ID: SignalTiming}.
+
+    POLICE_API_KEY 미설정 시 빈 dict 를 반환해 signals.SignalSimulator 의
+    결정적 가상 시뮬레이션으로 폴백한다. 교차로 좌표(X_COORD/Y_COORD)를
+    그래프 신호 노드와 최근접 매칭(max_dist_m 이내)해 노드ID로 키를 바꾼다 —
+    경찰청 데이터는 그래프의 OSM 노드ID를 모르기 때문이다.
+    """
+    api_key = os.environ.get("POLICE_API_KEY")
+    if not api_key:
+        return {}
+    intersections = await _fetch_police_intersections(api_key, region_code)
+    if not intersections:
+        return {}
+    plans = await _fetch_police_signal_plans(api_key, [i["int_no"] for i in intersections])
+    timings: dict[str, SignalTiming] = {}
+    for intersection in intersections:
+        plan = plans.get(intersection["int_no"])
+        if plan is None:
+            continue
+        node_id = _nearest_signal_node_id(graph, intersection["lat"], intersection["lon"], max_dist_m)
+        if node_id is not None:
+            timings[node_id] = plan
+    return timings
 
 
 def load_osm_graph(place: str, dem_path: str | None = None):

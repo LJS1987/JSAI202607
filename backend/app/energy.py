@@ -78,3 +78,18 @@ def min_energy_per_meter_wh(vehicle: Vehicle) -> float:
     """평지·최적 조건에서의 미터당 최소 소비(Wh/m). A* 휴리스틱 하한용."""
     f_roll = vehicle.rolling_coeff * vehicle.mass_kg * GRAVITY
     return (f_roll / vehicle.drivetrain_eff) / 3600.0
+
+
+def optimal_cruise_speed_ms(vehicle: Vehicle) -> float:
+    """공기저항-보조전력(공회전 포함) 트레이드오프 기반 이론적 최소소비 순항속도.
+
+    거리당 소비 = (구름저항 + 공기저항)/η_drive + P_aux/v. 구름저항은
+    속도 무관이라 최적점에 영향이 없고, 공기저항(∝v²)과 보조전력 비용
+    (시간당 일정 → 거리당 1/v)의 트레이드오프만으로 최소점이 정해진다:
+    v* = (P_aux · η_drive / (ρ·Cd·A)) ** (1/3).
+
+    이 모델의 단순화(구간·부하 무관 상수 효율)를 그대로 반영한 값이라
+    제조사 공인연비 시험의 "최적속도"와는 다를 수 있다.
+    """
+    rho_cd_a = AIR_DENSITY * vehicle.drag_coeff * vehicle.frontal_area_m2
+    return (vehicle.aux_power_w * vehicle.drivetrain_eff / rho_cd_a) ** (1 / 3)

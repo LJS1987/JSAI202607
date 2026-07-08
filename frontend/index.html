@@ -88,7 +88,8 @@
 <div id="map"></div>
 <div id="panel">
   <h1>EV 전비 최적 내비게이션</h1>
-  <p class="hint">데모 도로망: 서울 강남 일대. 지도 클릭으로도 출발지/도착지를 바꿀 수 있습니다.</p>
+  <p class="hint">데모 도로망: 서울 강남 일대. 지도 클릭으로도 출발지/도착지를 바꿀 수 있습니다.
+    <a href="/live" style="color:var(--series-eco)">📡 실주행 GPS 기록</a></p>
 
   <h2>출발지</h2>
   <button id="geolocate">📍 현재 위치 사용</button>
@@ -292,12 +293,15 @@ $('reset').onclick = () => {
 };
 
 // ---- 경로 요청·표시 ----
-function tiles(el, r) {
+function tiles(el, r, fuelType) {
+  const isEv = fuelType === 'ev';
+  const consumed = isEv ? r.energy_kwh : r.fuel_l;
+  const efficiency = isEv ? r.efficiency_km_per_kwh : r.efficiency_km_per_l;
   el.innerHTML = `
-    <div class="tile"><div class="v">${r.energy_kwh}</div><div class="k">kWh 소비</div></div>
+    <div class="tile"><div class="v">${consumed}</div><div class="k">${isEv ? 'kWh' : 'L'} 소비</div></div>
     <div class="tile"><div class="v">${r.time_min}</div><div class="k">분 소요</div></div>
     <div class="tile"><div class="v">${r.distance_km}</div><div class="k">km 거리</div></div>
-    <div class="tile"><div class="v">${r.efficiency_km_per_kwh.toFixed(1)}</div><div class="k">km/kWh 전비</div></div>`;
+    <div class="tile"><div class="v">${efficiency.toFixed(1)}</div><div class="k">${isEv ? 'km/kWh 전비' : 'km/L 연비'}</div></div>`;
 }
 
 async function requestRoute() {
@@ -331,8 +335,8 @@ function draw(data) {
   state.routeLines = [fast, eco];
   map.fitBounds(L.featureGroup([fast, eco, state.startMarker, state.endMarker]).getBounds().pad(0.15));
 
-  tiles($('eco-tiles'), data.eco);
-  tiles($('fast-tiles'), data.fastest);
+  tiles($('eco-tiles'), data.eco, data.vehicle.fuel_type);
+  tiles($('fast-tiles'), data.fastest, data.vehicle.fuel_type);
 
   const s = data.saving;
   $('saving').innerHTML = s.energy_wh > 0
@@ -343,11 +347,13 @@ function draw(data) {
 
   if (data.glosa && data.glosa.advisories.length) {
     const g = data.glosa;
+    const isEv = data.vehicle.fuel_type === 'ev';
+    const followed = isEv ? `${g.energy_kwh_if_followed} kWh` : `${g.fuel_l_if_followed} L`;
     $('glosa-card').hidden = false;
     $('glosa-summary').innerHTML =
       `신호 ${g.advisories.length}곳에서 감속 안내로 정차 회피 →
        <b style="color:var(--delta-good)">${g.saved_wh} Wh 추가 절약</b>
-       (안내 준수 시 총 ${g.energy_kwh_if_followed} kWh)<br>` +
+       (안내 준수 시 총 ${followed})<br>` +
       g.advisories.slice(0, 4).map(a =>
         `· ${a.original_kmh}→<b>${a.advisory_kmh}km/h</b> 감속, 대기 ${a.wait_avoided_s}초 회피`
       ).join('<br>');

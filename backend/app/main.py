@@ -5,29 +5,42 @@
 이후 http://localhost:8000 에서 지도 UI 사용.
 """
 
+import asyncio
+import logging
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from . import tripdb
+from .energy import optimal_cruise_speed_ms
 from .glosa import compute_advisories
 from .graph import Graph, haversine_m
 from .places import search_local
-from .providers import search_kakao_places
+from .providers import fetch_police_signal_timings, search_kakao_places
 from .regions import REGIONS
 from .routing import NoRouteError, RouteResult, find_route
 from .sample_data import ensure_sample_graph
-from .signals import SignalSimulator
-from .vehicles import DEFAULT_VEHICLE_ID, PRESETS
+from .signal_learning import estimate_timing, extract_visits
+from .signals import SignalSimulator, SignalTiming
+from .traffic import ROAD_CLASS_SPEED_KMH, normalize_road_class
+from .vehicles import DEFAULT_VEHICLE_ID, PRESETS, Vehicle
+
+logger = logging.getLogger(__name__)
 
 # 요청 지점이 도로망에서 이보다 멀면 커버리지 밖 경고를 붙인다
 COVERAGE_WARN_M = 1_500.0
+# 개인 GPS 핑이 신호 노드에서 이보다 멀면 기록하지 않는다
+MAX_PING_LOG_DIST_M = 40.0
 
 ROOT = Path(__file__).resolve().parents[2]
 # EV_NAV_GRAPH 로 실지도(OSM) 그래프 JSON 을 지정할 수 있다 (scripts/build_osm_graph.py 참고)
 GRAPH_PATH = Path(os.environ.get("EV_NAV_GRAPH", ROOT / "backend" / "data" / "sample_graph.json"))
+TRIP_DB_PATH = ROOT / "backend" / "data" / "trips.db"
 FRONTEND_DIR = ROOT / "frontend"
 
 app = FastAPI(title="EV 전비 최적 내비게이션", version="0.1.0")
@@ -46,20 +59,92 @@ def get_graph() -> Graph:
     return _graph
 
 
-def _route_payload(graph: Graph, result: RouteResult) -> dict:
+_real_timings: dict[str, SignalTiming] | None = None
+
+
+def get_real_timings(graph: Graph) -> dict[str, SignalTiming]:
+    """경찰청 신호운영 데이터(POLICE_API_KEY + POLICE_REGION_CODE 설정 시)를 1회 조회해 캐시한다.
+
+    미설정이거나 조회 실패 시 빈 dict — SignalSimulator 는 결정적 가상
+    시뮬레이션으로 그대로 폴백한다 (providers.fetch_police_signal_timings 참고).
+    """
+    global _real_timings
+    if _real_timings is None:
+        region_code = os.environ.get("POLICE_REGION_CODE")
+        if not os.environ.get("POLICE_API_KEY") or not region_code:
+            _real_timings = {}
+        else:
+            try:
+                _real_timings = asyncio.run(fetch_police_signal_timings(graph, region_code))
+            except Exception:
+                logger.warning("경찰청 신호운영 데이터 조회 실패 — 시뮬레이터로 폴백", exc_info=True)
+                _real_timings = {}
+    return _real_timings
+
+
+_trip_conn = None
+
+
+def get_trip_conn():
+    global _trip_conn
+    if _trip_conn is None:
+        TRIP_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _trip_conn = tripdb.connect(TRIP_DB_PATH)
+    return _trip_conn
+
+
+_learned_timings: dict[str, SignalTiming] | None = None
+
+
+def get_learned_timings(graph: Graph, force: bool = False) -> dict[str, SignalTiming]:
+    """개인 GPS 로그(tripdb)로 추정한 신호 타이밍. 표본 부족 시 해당 노드는 빠진다.
+
+    경찰청 실측과 달리 계속 쌓이는 데이터라 force=True 로 강제 재계산할 수
+    있다(POST /api/trip/relearn).
+    """
+    global _learned_timings
+    if _learned_timings is None or force:
+        conn = get_trip_conn()
+        learned: dict[str, SignalTiming] = {}
+        for node_id in tripdb.distinct_nodes(conn):
+            visits = extract_visits(tripdb.pings_for_node(conn, node_id))
+            timing = estimate_timing(visits)
+            if timing is not None:
+                learned[node_id] = timing
+        _learned_timings = learned
+    return _learned_timings
+
+
+def _merged_timings(graph: Graph) -> dict[str, SignalTiming]:
+    """우선순위: 경찰청 실측 > 개인 학습 추정 > (미해당 노드는) 가상 시뮬레이션."""
+    return {**get_learned_timings(graph), **get_real_timings(graph)}
+
+
+def _vehicle_payload(v: Vehicle) -> dict:
+    payload = {
+        "id": v.id,
+        "name": v.name,
+        "fuel_type": v.fuel_type,
+        "eco_speed_kmh": round(optimal_cruise_speed_ms(v) * 3.6, 1),
+    }
+    if v.fuel_type == "ev":
+        payload["battery_kwh"] = v.battery_kwh
+    else:
+        payload["tank_liters"] = v.tank_liters
+    return payload
+
+
+def _route_payload(graph: Graph, vehicle: Vehicle, result: RouteResult) -> dict:
     coords = [
         {"lat": graph.nodes[nid].lat, "lon": graph.nodes[nid].lon}
         for nid in result.node_ids
     ]
-    return {
+    eco_speed_kmh = optimal_cruise_speed_ms(vehicle) * 3.6
+    payload = {
         "mode": result.mode,
         "coordinates": coords,
         "distance_km": round(result.total_distance_m / 1000, 2),
         "time_min": round(result.total_time_s / 60, 1),
-        "energy_kwh": round(result.total_energy_wh / 1000, 3),
-        "efficiency_km_per_kwh": round(
-            result.total_distance_m / max(result.total_energy_wh, 1e-9), 2
-        ),
         "legs": [
             {
                 "from": leg.from_id,
@@ -69,10 +154,26 @@ def _route_payload(graph: Graph, result: RouteResult) -> dict:
                 "speed_kmh": leg.speed_kmh,
                 "energy_wh": round(leg.energy_wh, 1),
                 "wait_s": round(leg.wait_s, 1),
+                "eco_speed_kmh": round(
+                    min(eco_speed_kmh, ROAD_CLASS_SPEED_KMH.get(normalize_road_class(leg.road_class), 40.0)),
+                    1,
+                ),
             }
             for leg in result.legs
         ],
     }
+    if vehicle.fuel_type == "ev":
+        payload["energy_kwh"] = round(result.total_energy_wh / 1000, 3)
+        payload["efficiency_km_per_kwh"] = round(
+            result.total_distance_m / max(result.total_energy_wh, 1e-9), 2
+        )
+    else:
+        fuel_l = result.total_energy_wh / vehicle.wh_per_liter
+        payload["fuel_l"] = round(fuel_l, 3)
+        payload["efficiency_km_per_l"] = round(
+            result.total_distance_m / 1000 / max(fuel_l, 1e-9), 2
+        )
+    return payload
 
 
 @app.get("/api/regions")
@@ -117,7 +218,7 @@ def network() -> dict:
     신호 색을 직접 계산(시뮬레이터와 동일 규칙)할 수 있게 한다.
     """
     graph = get_graph()
-    sim = SignalSimulator()
+    sim = SignalSimulator(real_timings=_merged_timings(graph))
     nodes = {}
     for n in graph.nodes.values():
         item: dict = {"lat": n.lat, "lon": n.lon, "elev": n.elev_m, "signal": n.signal}
@@ -139,10 +240,7 @@ def network() -> dict:
 
 @app.get("/api/vehicles")
 def list_vehicles() -> list[dict]:
-    return [
-        {"id": v.id, "name": v.name, "battery_kwh": v.battery_kwh}
-        for v in PRESETS.values()
-    ]
+    return [_vehicle_payload(v) for v in PRESETS.values()]
 
 
 @app.get("/api/route")
@@ -178,7 +276,7 @@ def route(
                 f"가장 가까운 도로망 지점으로 안내합니다"
             )
 
-    signals = SignalSimulator() if signal_mode == "sim" else None
+    signals = SignalSimulator(real_timings=_merged_timings(graph)) if signal_mode == "sim" else None
     depart_s = hour * 3600.0
     try:
         eco = find_route(
@@ -196,6 +294,7 @@ def route(
     if signals is not None:
         advisories = compute_advisories(graph, ev, eco, depart_s, signals)
         saved_wh = sum(a.saved_wh for a in advisories)
+        remaining_wh = eco.total_energy_wh - saved_wh
         glosa_payload = {
             "advisories": [
                 {
@@ -213,20 +312,21 @@ def route(
                 for a in advisories
             ],
             "saved_wh": round(saved_wh, 1),
-            "energy_kwh_if_followed": round(
-                (eco.total_energy_wh - saved_wh) / 1000, 3
-            ),
         }
+        if ev.fuel_type == "ev":
+            glosa_payload["energy_kwh_if_followed"] = round(remaining_wh / 1000, 3)
+        else:
+            glosa_payload["fuel_l_if_followed"] = round(remaining_wh / ev.wh_per_liter, 3)
 
     saving_wh = fastest.total_energy_wh - eco.total_energy_wh
     return {
-        "vehicle": {"id": ev.id, "name": ev.name, "battery_kwh": ev.battery_kwh},
+        "vehicle": _vehicle_payload(ev),
         "hour": hour,
         "signal_mode": signal_mode,
         "warnings": warnings,
         "glosa": glosa_payload,
-        "eco": _route_payload(graph, eco),
-        "fastest": _route_payload(graph, fastest),
+        "eco": _route_payload(graph, ev, eco),
+        "fastest": _route_payload(graph, ev, fastest),
         "saving": {
             "energy_wh": round(saving_wh, 1),
             "energy_pct": round(
@@ -239,6 +339,34 @@ def route(
     }
 
 
+class TripPing(BaseModel):
+    lat: float
+    lon: float
+    speed_ms: float
+    ts: float | None = None
+
+
+@app.post("/api/trip/ping")
+def trip_ping(ping: TripPing) -> dict:
+    """실주행 GPS 핑 기록 (frontend/live.html). 신호 노드 근처가 아니면 버린다."""
+    graph = get_graph()
+    match = graph.nearest_signal_node(ping.lat, ping.lon, MAX_PING_LOG_DIST_M)
+    if match is None:
+        return {"logged": False, "node_id": None, "dist_m": None}
+    node, dist_m = match
+    ts = ping.ts if ping.ts is not None else time.time()
+    tripdb.log_ping(get_trip_conn(), node.id, dist_m, ping.lat, ping.lon, ping.speed_ms, ts)
+    return {"logged": True, "node_id": node.id, "dist_m": round(dist_m, 1)}
+
+
+@app.post("/api/trip/relearn")
+def trip_relearn() -> dict:
+    """누적된 GPS 로그로 개인 신호 타이밍 추정을 강제 재계산."""
+    graph = get_graph()
+    learned = get_learned_timings(graph, force=True)
+    return {"learned_nodes": len(learned)}
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
@@ -247,6 +375,11 @@ def index() -> FileResponse:
 @app.get("/3d")
 def three_d() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "3d.html")
+
+
+@app.get("/live")
+def live_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "live.html")
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

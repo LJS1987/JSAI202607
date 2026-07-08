@@ -59,6 +59,7 @@
   <div class="row"><span>소비 에너지</span><b id="energy">0 Wh</b></div>
   <div class="row"><span>남은 거리</span><b id="remain">- km</b></div>
   <div class="row"><span>경과 시간</span><b id="elapsed">0:00</b></div>
+  <div class="row"><span>연비 최적</span><b id="ecospeed">- km/h</b></div>
   <div class="row"><span>GLOSA 절약</span><b id="saved" style="color:var(--series-eco)">0 Wh</b></div>
 </div>
 
@@ -319,6 +320,7 @@ function updateHUD(st) {
   $('remain').textContent = `${((totalDist - st.distDone) / 1000).toFixed(2)} km`;
   const m = Math.floor(simT / 60), s = Math.floor(simT % 60);
   $('elapsed').textContent = `${m}:${String(s).padStart(2, '0')}`;
+  $('ecospeed').textContent = `${Math.round(st.leg.eco_speed_kmh)} km/h`;
   $('saved').textContent = `${totalSaved} Wh`;
 
   // 다음 신호 + GLOSA 배너
