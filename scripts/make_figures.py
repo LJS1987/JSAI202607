@@ -16,33 +16,41 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-# ---- 스타일 ----------------------------------------------------------------
-# CVD-safe 3색 (validate_palette.js 통과: ΔE 13.3, 대비 >= 3:1)
+# ---- 스타일 (Origin 스타일: 박스 프레임, 안쪽 눈금, 점선 그리드) -------------
 H2_LEVELS = [0, 20, 40]
-COLORS = {0: "#2a78d6", 20: "#008300", 40: "#e34948"}
+COLORS = {0: "#000000", 20: "#e60000", 40: "#0000e6"}  # 검정/빨강/파랑
 MARKERS = {0: "o", 20: "s", 40: "^"}
 LABELS = {0: "NG 100%", 20: "H$_2$ 20%", 40: "H$_2$ 40%"}
 
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
-    "font.size": 9,
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "legend.fontsize": 9,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "axes.linewidth": 0.8,
-    "axes.edgecolor": "#c3c2b7",
+    "font.size": 11,
+    "axes.labelsize": 13,
+    "axes.labelweight": "bold",
+    "axes.titlesize": 12,
+    "legend.fontsize": 11,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "axes.linewidth": 1.3,
+    "axes.edgecolor": "black",
     "axes.grid": True,
-    "grid.color": "#e1e0d9",
-    "grid.linewidth": 0.6,
-    "xtick.color": "#898781",
-    "ytick.color": "#898781",
-    "xtick.labelcolor": "#0b0b0b",
-    "ytick.labelcolor": "#0b0b0b",
-    "axes.labelcolor": "#0b0b0b",
-    "lines.linewidth": 1.6,
-    "lines.markersize": 5.5,
+    "grid.color": "#999999",
+    "grid.linestyle": "--",
+    "grid.linewidth": 0.7,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.top": True,
+    "ytick.right": True,
+    "xtick.major.size": 5,
+    "ytick.major.size": 5,
+    "xtick.major.width": 1.2,
+    "ytick.major.width": 1.2,
+    "legend.frameon": True,
+    "legend.edgecolor": "black",
+    "legend.framealpha": 1.0,
+    "legend.fancybox": False,
+    "lines.linewidth": 2.0,
+    "lines.markersize": 6.5,
     "figure.dpi": 120,
     "savefig.dpi": 300,
     "savefig.bbox": "tight",
@@ -52,8 +60,6 @@ LAMBDAS_ALL = [1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 1.9]
 
 
 def style_ax(ax):
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
     ax.grid(True, axis="both")
     ax.set_axisbelow(True)
 
@@ -67,7 +73,7 @@ def save(fig, name):
 
 # ---- 점화시기 스윕 그래프 (λ별 패널) ----------------------------------------
 def sweep_figure(df, ycol, ylabel, name, legend_loc="best"):
-    fig, axes = plt.subplots(2, 4, figsize=(11, 5.2), sharex=False)
+    fig, axes = plt.subplots(2, 4, figsize=(12, 6), sharex=False)
     axes = axes.ravel()
 
     for i, lam in enumerate(LAMBDAS_ALL):
@@ -102,7 +108,7 @@ def sweep_figure(df, ycol, ylabel, name, legend_loc="best"):
     handles.append(plt.Line2D([], [], color="#52514e", marker="o", linestyle="none",
                               markerfacecolor="white", markeredgecolor="#52514e",
                               label="Knock observed"))
-    ax.legend(handles=handles, loc="center", frameon=False)
+    ax.legend(handles=handles, loc="center")
     axes[3].set_xlabel("Spark timing [CAD bTDC]")
 
     fig.tight_layout()
@@ -121,17 +127,18 @@ def opt_lines(ax, opt, ycol):
 
 
 def opt_single(opt, ycol, ylabel, name, legend=True):
-    fig, ax = plt.subplots(figsize=(3.6, 3.0))
+    fig, ax = plt.subplots(figsize=(4.6, 3.8))
     opt_lines(ax, opt, ycol)
     ax.set_xlabel("Excess air ratio, $\\lambda$ [-]")
     ax.set_ylabel(ylabel)
     if legend:
-        ax.legend(frameon=False)
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=3,
+                  columnspacing=1.0, handlelength=1.6, borderaxespad=0.0)
     fig.tight_layout()
     save(fig, name)
 
 
-def opt_grid(opt, panels, name, ncols=2, figsize=(7.2, 5.6)):
+def opt_grid(opt, panels, name, ncols=2, figsize=(9.0, 7.0)):
     nrows = int(np.ceil(len(panels) / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes = np.atleast_1d(axes).ravel()
@@ -141,7 +148,7 @@ def opt_grid(opt, panels, name, ncols=2, figsize=(7.2, 5.6)):
         ax.set_xlabel("Excess air ratio, $\\lambda$ [-]")
     for ax in axes[len(panels):]:
         ax.axis("off")
-    axes[0].legend(frameon=False)
+    axes[0].legend()
     fig.tight_layout()
     save(fig, name)
 
@@ -171,7 +178,7 @@ def main():
              "fig08_opt_intake_exhaust")
 
     # BTE-NOx 트레이드오프 (최적점, 계열별 희박 한계점만 λ 직접 표기)
-    fig, ax = plt.subplots(figsize=(4.6, 3.6))
+    fig, ax = plt.subplots(figsize=(5.4, 4.2))
     lean_offsets = {0: (8, 2), 20: (-14, -14), 40: (6, 6)}
     rich_offsets = {0: (6, 2), 20: (6, -11), 40: (-38, -4)}
     for h2 in H2_LEVELS:
@@ -190,7 +197,7 @@ def main():
     style_ax(ax)
     ax.set_xlabel("NO$_x$ [g/kWh]")
     ax.set_ylabel("BTE [%]")
-    ax.legend(frameon=False, loc="lower right")
+    ax.legend(loc="upper right")
     fig.tight_layout()
     save(fig, "fig09_opt_bte_nox_tradeoff")
 
