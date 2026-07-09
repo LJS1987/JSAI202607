@@ -7,8 +7,10 @@
 
 import asyncio
 import logging
+import math
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -17,14 +19,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import tripdb
+from . import providers
 from .energy import optimal_cruise_speed_ms
 from .glosa import compute_advisories
 from .graph import Graph, haversine_m
+from .maneuvers import build_maneuvers
 from .places import search_local
 from .providers import fetch_police_signal_timings, search_kakao_places
 from .regions import REGIONS
 from .routing import NoRouteError, RouteResult, find_route
-from .sample_data import ensure_sample_graph
+from .sample_data import GRID_N, build_grid_graph, ensure_sample_graph
 from .signal_learning import estimate_timing, extract_visits
 from .signals import SignalSimulator, SignalTiming
 from .traffic import ROAD_CLASS_SPEED_KMH, normalize_road_class
@@ -36,16 +40,35 @@ logger = logging.getLogger(__name__)
 COVERAGE_WARN_M = 1_500.0
 # 개인 GPS 핑이 신호 노드에서 이보다 멀면 기록하지 않는다
 MAX_PING_LOG_DIST_M = 40.0
+# 출발·도착 직선거리가 이보다 멀면 거절한다 — 실질적인 안전판으로만 쓴다
+# (남한 대각선 최장거리가 약 480km라 600km면 국내 어디서나 충분히 커버된다).
+# 이보다 훨씬 멀면 bbox 가 국가 단위로 커져 OSM 다운로드·격자망 계산이
+# 비현실적으로 무거워지므로 그 지점만 거절한다. 환경변수로 조절 가능.
+MAX_TRIP_KM = float(os.environ.get("EV_NAV_MAX_TRIP_KM", "600"))
+# 이보다 먼 거리는 OSM bbox 요청을 "주요 도로만"(고속도로·간선)으로 좁혀
+# Overpass 쿼리 크기를 억제한다 — 장거리는 어차피 간선 위주로 다니므로
+# 이면도로까지 받을 필요가 적다는 점도 반영한다.
+HIGHWAY_ONLY_THRESHOLD_KM = 40.0
+# 합성 격자망 폴백의 셀 간격 목표(km) — 이보다 넓은 지역은 격자 해상도(grid_n)를
+# 늘려 근사 품질을 유지하되, 계산량 폭주를 막기 위해 grid_n 상한을 둔다.
+_SYNTHETIC_TARGET_CELL_KM = 4.0
+_SYNTHETIC_GRID_N_MAX = 60
+# 지역 그래프 캐시 최대 보관 개수 (LRU)
+_REGION_CACHE_MAX = 16
 
 ROOT = Path(__file__).resolve().parents[2]
-# EV_NAV_GRAPH 로 실지도(OSM) 그래프 JSON 을 지정할 수 있다 (scripts/build_osm_graph.py 참고)
+# EV_NAV_GRAPH 로 실지도(OSM) 그래프 JSON 을 지정할 수 있다 (scripts/build_osm_graph.py 참고).
+# 지정하지 않으면 기본 샘플 그래프(강남 일대)를 쓰되, /api/route 는 이 범위
+# 밖의 출발/도착에 대해 get_graph_for_route() 로 그때그때 해당 지역 그래프를
+# 동적으로 확보한다(OSM bbox 우선, 실패 시 합성 격자망 폴백).
 GRAPH_PATH = Path(os.environ.get("EV_NAV_GRAPH", ROOT / "backend" / "data" / "sample_graph.json"))
 TRIP_DB_PATH = ROOT / "backend" / "data" / "trips.db"
 FRONTEND_DIR = ROOT / "frontend"
 
-app = FastAPI(title="EV 전비 최적 내비게이션", version="0.1.0")
+app = FastAPI(title="AI 내비게이션", version="0.1.0")
 
 _graph: Graph | None = None
+_region_graph_cache: "OrderedDict[tuple[float, float, float, float], tuple[Graph, bool]]" = OrderedDict()
 
 
 def get_graph() -> Graph:
@@ -57,6 +80,104 @@ def get_graph() -> Graph:
             ensure_sample_graph(GRAPH_PATH)
         _graph = Graph.from_json(GRAPH_PATH)
     return _graph
+
+
+def _covers(graph: Graph, lat: float, lon: float) -> bool:
+    """graph 에 (lat, lon) 근처(COVERAGE_WARN_M 이내) 도로가 있는지."""
+    node = graph.nearest_node(lat, lon)
+    return haversine_m(lat, lon, node.lat, node.lon) <= COVERAGE_WARN_M
+
+
+def _padded_bbox(
+    s_lat: float, s_lon: float, e_lat: float, e_lon: float
+) -> tuple[float, float, float, float]:
+    """출발·도착을 감싸는 bbox에 여유 패딩을 둔다 (min_lat, max_lat, min_lon, max_lon)."""
+    lat_span = abs(e_lat - s_lat)
+    lon_span = abs(e_lon - s_lon)
+    pad = max(0.02, 0.15 * max(lat_span, lon_span))
+    return (
+        min(s_lat, e_lat) - pad, max(s_lat, e_lat) + pad,
+        min(s_lon, e_lon) - pad, max(s_lon, e_lon) + pad,
+    )
+
+
+def _bbox_span_km(min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> float:
+    lat_km = (max_lat - min_lat) * 111.32
+    lon_km = (max_lon - min_lon) * 111.32 * math.cos(math.radians((min_lat + max_lat) / 2))
+    return max(lat_km, lon_km)
+
+
+def _grid_n_for_span(span_km: float) -> int:
+    """장거리일수록 합성 격자망 해상도를 높여 셀 간격을 ~_SYNTHETIC_TARGET_CELL_KM 근처로 유지.
+
+    grid_n 이 커질수록(최대 _SYNTHETIC_GRID_N_MAX) 탐색 비용도 커지므로 상한을 둔다.
+    """
+    n = round(span_km / _SYNTHETIC_TARGET_CELL_KM) + 1
+    return max(GRID_N, min(n, _SYNTHETIC_GRID_N_MAX))
+
+
+def get_graph_for_route(
+    s_lat: float, s_lon: float, e_lat: float, e_lon: float
+) -> tuple[Graph, bool]:
+    """출발/도착 좌표를 커버하는 그래프를 확보한다. (graph, is_synthetic) 반환.
+
+    1. EV_NAV_GRAPH 를 명시적으로 지정했으면 항상 그 그래프를 쓴다(기존 동작 보존).
+    2. 아니면 기본 샘플 그래프(강남 일대)가 두 지점을 모두 커버하면 그대로 재사용
+       — 강남 좌표에 대한 기존 테스트·동작은 완전히 그대로다.
+    3. 그 밖의 지역은 두 지점을 감싸는 bbox 로 OSM 실도로망을 그때그때 내려받는다
+       (providers.load_osm_graph_bbox). HIGHWAY_ONLY_THRESHOLD_KM 을 넘는 장거리는
+       고속도로·간선만 받아 Overpass 쿼리 크기를 억제한다. 실패(osmnx 미설치·
+       오프라인·Overpass 오류)하면 같은 bbox 를 감싸는 합성 격자망
+       (sample_data.build_grid_graph)으로 폴백해 인터넷이 없어도, 그리고 초장거리
+       라도 항상 결과를 낸다 — 격자 해상도는 거리에 비례해 늘려 근사 품질을 유지한다.
+    4. 직선거리가 MAX_TRIP_KM(기본 600km, 국내 최장 거리보다 넉넉함)을 넘으면
+       그 지점만 거절한다 — bbox 가 국가/대륙 단위로 커져 다운로드·계산이
+       비현실적으로 무거워지는 것을 막는 안전판일 뿐, 국내 장거리는 모두 지원한다.
+
+    지역 그래프는 bbox 를 0.01도(~1km) 격자로 반올림한 키로 캐싱한다.
+    """
+    if "EV_NAV_GRAPH" in os.environ:
+        return get_graph(), False
+
+    default = get_graph()
+    if _covers(default, s_lat, s_lon) and _covers(default, e_lat, e_lon):
+        return default, False
+
+    trip_km = haversine_m(s_lat, s_lon, e_lat, e_lon) / 1000.0
+    if trip_km > MAX_TRIP_KM:
+        raise HTTPException(
+            400,
+            f"출발·도착 직선거리가 {trip_km:.0f}km 로 이 프로토타입의 처리 범위"
+            f"(최대 {MAX_TRIP_KM:.0f}km)를 넘었습니다",
+        )
+
+    min_lat, max_lat, min_lon, max_lon = _padded_bbox(s_lat, s_lon, e_lat, e_lon)
+    key = (round(min_lat, 2), round(max_lat, 2), round(min_lon, 2), round(max_lon, 2))
+    cached = _region_graph_cache.get(key)
+    if cached is not None:
+        _region_graph_cache.move_to_end(key)
+        return cached
+
+    highway_only = trip_km > HIGHWAY_ONLY_THRESHOLD_KM
+    try:
+        graph = providers.load_osm_graph_bbox(
+            min_lat, min_lon, max_lat, max_lon, highway_only=highway_only,
+        )
+        is_synthetic = False
+    except Exception:
+        logger.info(
+            "OSM 실도로망을 가져오지 못해 합성 격자망으로 폴백합니다 (bbox=%s)",
+            key, exc_info=True,
+        )
+        grid_n = _grid_n_for_span(_bbox_span_km(min_lat, max_lat, min_lon, max_lon))
+        graph = Graph.from_dict(build_grid_graph(min_lat, max_lat, min_lon, max_lon, grid_n))
+        is_synthetic = True
+
+    _region_graph_cache[key] = (graph, is_synthetic)
+    _region_graph_cache.move_to_end(key)
+    if len(_region_graph_cache) > _REGION_CACHE_MAX:
+        _region_graph_cache.popitem(last=False)
+    return graph, is_synthetic
 
 
 _real_timings: dict[str, SignalTiming] | None = None
@@ -140,11 +261,22 @@ def _route_payload(graph: Graph, vehicle: Vehicle, result: RouteResult) -> dict:
         for nid in result.node_ids
     ]
     eco_speed_kmh = optimal_cruise_speed_ms(vehicle) * 3.6
+    maneuvers = build_maneuvers(graph, result.node_ids, [leg.length_m for leg in result.legs])
     payload = {
         "mode": result.mode,
         "coordinates": coords,
         "distance_km": round(result.total_distance_m / 1000, 2),
         "time_min": round(result.total_time_s / 60, 1),
+        "maneuvers": [
+            {
+                "lat": m.lat,
+                "lon": m.lon,
+                "type": m.type,
+                "distance_m": m.distance_m,
+                "cumulative_m": m.cumulative_m,
+            }
+            for m in maneuvers
+        ],
         "legs": [
             {
                 "from": leg.from_id,
@@ -250,13 +382,14 @@ def route(
     end_lat: float = Query(..., description="도착 위도"),
     end_lon: float = Query(..., description="도착 경도"),
     hour: int = Query(8, ge=0, le=23, description="출발 시각(0-23시)"),
+    is_weekend: bool = Query(False, description="평일/주말 교통 패턴 선택"),
     vehicle: str = Query(DEFAULT_VEHICLE_ID),
     signal_mode: str = Query("sim", pattern="^(sim|stats)$", description="신호 반영: sim=시뮬레이터 확정 판정+GLOSA, stats=통계 기대값"),
 ) -> dict:
-    """전비 최적 경로와 최소 시간 경로를 함께 계산해 비교 결과를 반환."""
+    """전비 최적 경로와 최소 시간 경로를 함께 계산해 비교 결과를 반환. 전국 어디서나 출발/도착 가능."""
     if vehicle not in PRESETS:
         raise HTTPException(404, f"알 수 없는 차종: {vehicle}")
-    graph = get_graph()
+    graph, is_synthetic = get_graph_for_route(start_lat, start_lon, end_lat, end_lon)
     ev = PRESETS[vehicle]
 
     start = graph.nearest_node(start_lat, start_lon)
@@ -272,20 +405,25 @@ def route(
         gap_m = haversine_m(lat, lon, node.lat, node.lon)
         if gap_m > COVERAGE_WARN_M:
             warnings.append(
-                f"{label}가 데모 도로망(강남 일대)에서 {gap_m / 1000:.1f}km 밖이라 "
+                f"{label}가 도로망 데이터에서 {gap_m / 1000:.1f}km 밖이라 "
                 f"가장 가까운 도로망 지점으로 안내합니다"
             )
+    if is_synthetic:
+        warnings.append(
+            "이 지역은 실도로망(OSM) 데이터를 가져오지 못해 근사 격자망으로 계산했습니다 — "
+            "실제 도로 형태·제한속도와 다를 수 있습니다"
+        )
 
     signals = SignalSimulator(real_timings=_merged_timings(graph)) if signal_mode == "sim" else None
     depart_s = hour * 3600.0
     try:
         eco = find_route(
             graph, ev, start.id, goal.id, hour, mode="eco",
-            signals=signals, depart_s=depart_s,
+            signals=signals, depart_s=depart_s, is_weekend=is_weekend,
         )
         fastest = find_route(
             graph, ev, start.id, goal.id, hour, mode="fastest",
-            signals=signals, depart_s=depart_s,
+            signals=signals, depart_s=depart_s, is_weekend=is_weekend,
         )
     except NoRouteError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -322,6 +460,7 @@ def route(
     return {
         "vehicle": _vehicle_payload(ev),
         "hour": hour,
+        "is_weekend": is_weekend,
         "signal_mode": signal_mode,
         "warnings": warnings,
         "glosa": glosa_payload,
@@ -380,6 +519,11 @@ def three_d() -> FileResponse:
 @app.get("/live")
 def live_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "live.html")
+
+
+@app.get("/nav")
+def nav_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "nav.html")
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EV 전비 내비 — 3D 주행</title>
+<title>AI 내비게이션 — 3D 주행</title>
 <style>
   :root {
     --surface-1: #1a1a19;
@@ -119,6 +119,7 @@ const params = {
   start_lat: qs.get('start_lat') ?? 37.4979, start_lon: qs.get('start_lon') ?? 127.0276,
   end_lat: qs.get('end_lat') ?? 37.5115, end_lon: qs.get('end_lon') ?? 127.0595,
   hour: qs.get('hour') ?? 8, vehicle: qs.get('vehicle') ?? 'ioniq5',
+  is_weekend: qs.get('is_weekend') ?? 'false',
   signal_mode: 'sim',
 };
 

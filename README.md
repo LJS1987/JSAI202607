@@ -29,6 +29,10 @@ uvicorn backend.app.main:app --reload
   현시가 실시간 애니메이션되고, GLOSA 권장 속도로 감속해 무정차 통과하는
   과정과 에너지 절약량, 그리고 **연비 최적 순항 속도**를 HUD 로 보여줍니다.
   체이스/버드뷰, 1×/5×/20× 배속.
+- **턴바이턴 안내**(`/nav`): 경로 계산 후 `🧭 턴바이턴 안내 시작`을 누르면
+  GPS 위치를 추적하며 다음 회전 지점까지 거리·방향(좌/우회전·유턴)을
+  실시간으로 안내합니다. 도로명 데이터가 없어(OSM `name` 태그 미저장)
+  거리·방향 위주의 일반 안내입니다.
 - **실주행 GPS 기록**(`/live`): 폰 브라우저로 열어 실제 주행 중 GPS를 추적,
   신호 교차로 근처 위치만 서버에 기록합니다. 쌓인 기록으로 개인화된 신호
   타이밍을 추정합니다 — 아래 "개인 GPS 신호학습" 참고.
@@ -113,6 +117,7 @@ python -m pytest backend/tests
 | `POST /api/trip/relearn` | 누적 GPS 로그로 개인 신호 타이밍 추정 재계산 |
 | `GET /` | 지도 UI |
 | `GET /3d` | 3D 주행 시뮬레이션 |
+| `GET /nav` | 턴바이턴 안내 |
 | `GET /live` | 실주행 GPS 기록 |
 
 ## 실서비스 데이터 연동 로드맵 (`backend/app/providers.py`)
@@ -212,6 +217,7 @@ backend/
     glosa.py           # GLOSA 녹색 신호 최적 속도 안내
     graph.py           # 도로망 그래프 (노드=교차로, 엣지=링크), 최근접 신호 노드 매칭
     routing.py         # 전위 보정 다익스트라 + 시간 의존 신호 판정 (eco / fastest)
+    maneuvers.py       # 경로 좌표열 → 턴바이턴 회전 안내(좌/우회전·유턴) 추출
     sample_data.py     # 강남 일대 샘플 도로망 생성기
     regions.py         # 전국 시/도·시/군/구 근사 좌표 (주소 선택용)
     places.py          # 통합검색 내장 POI + 로컬 검색
@@ -224,6 +230,7 @@ scripts/
 frontend/
   index.html       # Leaflet 지도 UI (경로 비교·GLOSA·절약량 표시, EV/ICE 단위 전환)
   3d.html          # Three.js 3D 주행 시뮬레이션 (신호 애니메이션·GLOSA·연비 최적 속도 HUD)
+  nav.html         # 턴바이턴 안내 화면 (GPS 추적하며 회전 안내 갱신)
   live.html        # 실주행 GPS 기록 페이지
   vendor/          # Leaflet·Three.js 로컬 번들 (오프라인 동작)
 ```

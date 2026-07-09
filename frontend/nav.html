@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>턴바이턴 안내 — AI 내비게이션</title>
+<link rel="stylesheet" href="/static/vendor/leaflet.css">
+<style>
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --border: rgba(11,11,11,0.10);
+    --series-eco: #1baf7a;
+    --status-good: #0ca30c;
+    --status-critical: #d6392a;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --border: rgba(255,255,255,0.10);
+      --series-eco: #199e70;
+      --status-good: #0ca30c;
+      --status-critical: #e35b4d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body.viz-root {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--text-primary);
+  }
+  #map { flex: 1; min-height: 0; }
+  #banner {
+    display: flex; align-items: center; gap: 14px;
+    padding: 16px; background: var(--surface-1); border-bottom: 1px solid var(--border);
+  }
+  #banner .icon { font-size: 34px; line-height: 1; width: 44px; text-align: center; }
+  #banner .main { flex: 1; min-width: 0; }
+  #banner .dist { font-size: 22px; font-weight: 700; }
+  #banner .instr { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  #banner .eta { text-align: right; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  #banner .eta .v { font-size: 15px; font-weight: 650; color: var(--text-primary); }
+  #list-toggle {
+    padding: 6px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+  }
+  #steps {
+    max-height: 40vh; overflow-y: auto; background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+  }
+  #steps.hidden { display: none; }
+  #steps ul { list-style: none; margin: 0; padding: 0; }
+  #steps li {
+    display: flex; align-items: center; gap: 10px; padding: 9px 16px;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  #steps li.done { opacity: 0.4; }
+  #steps li.current { background: var(--page); font-weight: 650; }
+  #steps li .icon { font-size: 18px; width: 24px; text-align: center; }
+  #steps li .d { margin-left: auto; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+  #status {
+    font-size: 12px; color: var(--text-muted); padding: 6px 16px;
+    background: var(--surface-1);
+  }
+  a.back { color: var(--text-muted); text-decoration: none; }
+</style>
+</head>
+<body class="viz-root">
+<div id="banner">
+  <div class="icon" id="b-icon">🧭</div>
+  <div class="main">
+    <div class="dist" id="b-dist">경로 불러오는 중…</div>
+    <div class="instr" id="b-instr"></div>
+  </div>
+  <div class="eta">
+    <div class="v" id="b-eta">–</div>
+    <div id="b-remain">–</div>
+  </div>
+  <button id="list-toggle">전체 안내</button>
+</div>
+<div id="steps" class="hidden"><ul id="step-list"></ul></div>
+<div id="map"></div>
+<div id="status"><a class="back" href="/">← 경로 계획으로 돌아가기</a> · <span id="status-text"></span></div>
+
+<script src="/static/vendor/leaflet.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+
+const TURN_ICON = {
+  depart: '🧭', arrive: '🏁',
+  straight: '⬆️',
+  slight_left: '↖️', left: '⬅️', sharp_left: '↙️',
+  slight_right: '↗️', right: '➡️', sharp_right: '↘️',
+  uturn: '↩️',
+};
+const TURN_LABEL = {
+  depart: '출발', arrive: '목적지 도착',
+  slight_left: '좌측 방향으로 완만하게', left: '좌회전', sharp_left: '좌측으로 급하게',
+  slight_right: '우측 방향으로 완만하게', right: '우회전', sharp_right: '우측으로 급하게',
+  uturn: '유턴',
+};
+
+const params = {
+  start_lat: qs.get('start_lat'), start_lon: qs.get('start_lon'),
+  end_lat: qs.get('end_lat'), end_lon: qs.get('end_lon'),
+  hour: qs.get('hour') ?? new Date().getHours(),
+  is_weekend: qs.get('is_weekend') ?? 'false',
+  vehicle: qs.get('vehicle') ?? 'ioniq5',
+};
+
+const map = L.map('map');
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+}).addTo(map);
+
+let maneuvers = [];
+// maneuvers[0]은 항상 출발지 자체(depart)라 지나간 것으로 보고, 다음 안내
+// 지점(index 1부터)까지의 거리를 안내 대상으로 삼는다.
+let nextIdx = 1;
+let posMarker = null;
+let watchId = null;
+
+function fmtDist(m) {
+  return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${Math.round(m)}m`;
+}
+
+// 경로 좌표에 GPS 위치를 맵매칭하지 않고, 다음 안내 지점까지 직선거리로
+// 근사한다 — 이 프로토타입의 다른 부분(coverage 경고 등)과 같은 단순화.
+function distToNext(lat, lon) {
+  const target = maneuvers[nextIdx];
+  return target ? map.distance([lat, lon], [target.lat, target.lon]) : 0;
+}
+
+function renderBanner(liveDist) {
+  const target = maneuvers[nextIdx];
+  if (!target) return;
+  $('b-icon').textContent = TURN_ICON[target.type] || '⬆️';
+  $('b-dist').textContent = fmtDist(liveDist ?? target.distance_m);
+  $('b-instr').textContent = TURN_LABEL[target.type] || target.type;
+  const totalM = maneuvers[maneuvers.length - 1].cumulative_m;
+  const passedM = maneuvers[nextIdx - 1].cumulative_m;
+  $('b-remain').textContent = `잔여 ${fmtDist(totalM - passedM)}`;
+}
+
+function renderStepList() {
+  const ul = $('step-list');
+  ul.innerHTML = '';
+  maneuvers.forEach((m, i) => {
+    const li = document.createElement('li');
+    li.className = i < nextIdx ? 'done' : (i === nextIdx ? 'current' : '');
+    li.innerHTML = `<span class="icon">${TURN_ICON[m.type] || '⬆️'}</span>
+      <span>${TURN_LABEL[m.type] || m.type}</span>
+      <span class="d">${fmtDist(m.distance_m)}</span>`;
+    ul.appendChild(li);
+  });
+}
+
+$('list-toggle').onclick = () => $('steps').classList.toggle('hidden');
+
+async function loadRoute() {
+  if (!params.start_lat || !params.end_lat) {
+    $('status-text').textContent = '출발지/도착지가 지정되지 않았습니다 — 경로 계획 화면에서 다시 시작하세요.';
+    return;
+  }
+  $('status-text').textContent = '경로 계산 중…';
+  const resp = await fetch('/api/route?' + new URLSearchParams(params));
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    $('status-text').textContent = `오류: ${err.detail || resp.status}`;
+    return;
+  }
+  const data = await resp.json();
+  maneuvers = data.eco.maneuvers;
+
+  const line = L.polyline(
+    data.eco.coordinates.map(c => [c.lat, c.lon]),
+    { color: getComputedStyle(document.body).getPropertyValue('--series-eco').trim(), weight: 6, opacity: 0.9 },
+  ).addTo(map);
+  map.fitBounds(line.getBounds().pad(0.1));
+
+  for (const m of maneuvers) {
+    if (m.type === 'depart' || m.type === 'arrive') continue;
+    L.circleMarker([m.lat, m.lon], { radius: 5, color: '#d6392a', fillOpacity: 1 }).addTo(map);
+  }
+
+  renderBanner();
+  renderStepList();
+  $('status-text').textContent = `${data.vehicle.name} · 전비 최적 경로 기준 안내`;
+  startTracking();
+}
+
+function advanceStep(lat, lon) {
+  let d = distToNext(lat, lon);
+  // 다음 안내 지점에 가까워지면(50m 이내) 넘기고, 그 다음 지점까지 거리로 갱신한다
+  while (nextIdx < maneuvers.length - 1 && d <= 50) {
+    nextIdx++;
+    d = distToNext(lat, lon);
+  }
+  renderBanner(d);
+  renderStepList();
+}
+
+function startTracking() {
+  if (!navigator.geolocation) return;
+  watchId = navigator.geolocation.watchPosition((pos) => {
+    const { latitude: lat, longitude: lon } = pos.coords;
+    if (!posMarker) {
+      posMarker = L.marker([lat, lon]).addTo(map);
+    } else {
+      posMarker.setLatLng([lat, lon]);
+    }
+    map.panTo([lat, lon]);
+    advanceStep(lat, lon);
+  }, () => {}, { enableHighAccuracy: true });
+}
+
+addEventListener('beforeunload', () => {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+});
+
+map.setView([37.51, 127.045], 15);
+loadRoute();
+</script>
+</body>
+</html>

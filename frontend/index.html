@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EV 전비 최적 내비게이션</title>
+<title>AI 내비게이션</title>
 <link rel="stylesheet" href="/static/vendor/leaflet.css">
 <style>
   .viz-root {
@@ -45,11 +45,13 @@
   h2 { font-size: 13px; margin: 16px 0 6px; color: var(--text-secondary); }
   .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; }
   label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
-  select, button, input[type=text] {
+  select, button, input[type=text], input[type=date], input[type=time] {
     width: 100%; padding: 8px; font-size: 13px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
   }
   button { cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #calc { font-weight: 650; padding: 10px; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   .chip {
@@ -87,8 +89,9 @@
 <body class="viz-root">
 <div id="map"></div>
 <div id="panel">
-  <h1>EV 전비 최적 내비게이션</h1>
-  <p class="hint">데모 도로망: 서울 강남 일대. 지도 클릭으로도 출발지/도착지를 바꿀 수 있습니다.
+  <h1>AI 내비게이션</h1>
+  <p class="hint">출발지·도착지를 전국 어디서나 검색하거나 지도를 클릭해 지정할 수 있습니다.
+    실도로 데이터가 없는 지역은 근사 도로망으로 계산됩니다.
     <a href="/live" style="color:var(--series-eco)">📡 실주행 GPS 기록</a></p>
 
   <h2>출발지</h2>
@@ -113,17 +116,30 @@
   <span class="chip" id="end-label">미지정</span>
 
   <h2>옵션</h2>
-  <div class="row">
-    <div>
-      <label for="vehicle">차종</label>
-      <select id="vehicle"></select>
-    </div>
-    <div>
-      <label for="hour">출발 시각</label>
-      <select id="hour"></select>
+  <label for="vehicle">차종</label>
+  <select id="vehicle"></select>
+
+  <h2>출발 시각</h2>
+  <div class="tabs">
+    <button id="tab-now" class="active">지금 출발</button>
+    <button id="tab-later">나중에 출발</button>
+  </div>
+  <div id="pane-later" hidden>
+    <div class="row">
+      <div>
+        <label for="depart-date">날짜</label>
+        <input type="date" id="depart-date">
+      </div>
+      <div>
+        <label for="depart-time">시각</label>
+        <input type="time" id="depart-time">
+      </div>
     </div>
   </div>
-  <button id="reset" style="margin-top:12px">초기화</button>
+  <p class="hint" style="margin-top:6px">※ 교통 패턴은 시간대·평일/주말 근사이며, 특정 날짜의 실제 정체는 반영하지 않습니다.</p>
+
+  <button id="calc" style="margin-top:8px" disabled>🧭 경로 계산</button>
+  <button id="reset" style="margin-top:8px">초기화</button>
 
   <div id="results" hidden>
     <div class="route-card">
@@ -139,7 +155,12 @@
       <div class="name">🚦 GLOSA 신호 연동 안내</div>
       <div id="glosa-summary" style="font-size:12px; color:var(--text-secondary); margin-top:6px"></div>
     </div>
-    <a id="view3d" href="/3d" style="display:block; text-align:center; margin-top:12px;
+    <a id="viewnav" href="/nav" style="display:block; text-align:center; margin-top:8px;
+       padding:9px; border:1px solid var(--border); border-radius:6px;
+       color:var(--text-primary); text-decoration:none; font-size:13px; font-weight:600">
+      🧭 턴바이턴 안내 시작
+    </a>
+    <a id="view3d" href="/3d" style="display:block; text-align:center; margin-top:8px;
        padding:9px; border:1px solid var(--border); border-radius:6px;
        color:var(--text-primary); text-decoration:none; font-size:13px; font-weight:600">
       🚗 3D 주행 시뮬레이션 보기
@@ -164,14 +185,51 @@ const state = {
   routeLines: [],
 };
 
-// ---- 옵션 셀렉트 ----
-const hourSel = $('hour');
-for (let h = 0; h < 24; h++) {
-  hourSel.add(new Option(`${String(h).padStart(2, '0')}:00`, h, false, h === 8));
-}
+// ---- 옵션: 차종 ----
 fetch('/api/vehicles').then(r => r.json()).then(list => {
   for (const v of list) $('vehicle').add(new Option(v.name, v.id));
 });
+
+// ---- 출발 시각: 지금 출발 / 나중에 출발 ----
+const WEEKDAY_KO = ['일', '월', '화', '수', '목', '금', '토'];
+const pad2 = (n) => String(n).padStart(2, '0');
+let departMode = 'now';
+
+function showDepartTab(which) {
+  departMode = which;
+  $('tab-now').classList.toggle('active', which === 'now');
+  $('tab-later').classList.toggle('active', which === 'later');
+  $('pane-later').hidden = which !== 'later';
+}
+$('tab-now').onclick = () => showDepartTab('now');
+$('tab-later').onclick = () => showDepartTab('later');
+
+const departDate = $('depart-date');
+const departTime = $('depart-time');
+{
+  const now = new Date();
+  departDate.min = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  departDate.value = departDate.min;
+  const nextHour = new Date(now.getTime() + 60 * 60 * 1000);
+  departTime.value = `${pad2(nextHour.getHours())}:00`;
+}
+
+function formatDepartLabel(dt) {
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`
+    + `(${WEEKDAY_KO[dt.getDay()]}) ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+}
+
+/** 현재 옵션(지금/나중 출발)에서 서버에 보낼 {hour, isWeekend, label} 계산 */
+function getDepartInfo() {
+  if (departMode === 'later' && departDate.value && departTime.value) {
+    const [y, m, d] = departDate.value.split('-').map(Number);
+    const [hh, mm] = departTime.value.split(':').map(Number);
+    const dt = new Date(y, m - 1, d, hh, mm || 0);
+    return { hour: hh, isWeekend: dt.getDay() === 0 || dt.getDay() === 6, label: formatDepartLabel(dt) };
+  }
+  const now = new Date();
+  return { hour: now.getHours(), isWeekend: now.getDay() === 0 || now.getDay() === 6, label: formatDepartLabel(now) };
+}
 
 // ---- 출발지: 현재 위치 ----
 $('geolocate').onclick = () => {
@@ -260,22 +318,29 @@ function setMarker(existing, latlng, label) {
   if (existing) map.removeLayer(existing);
   return L.marker(latlng).addTo(map).bindTooltip(label, { permanent: true, direction: 'top' });
 }
+function updateCalcButtonState() {
+  $('calc').disabled = !(state.start && state.end);
+}
 function setStart(latlng, label) {
   state.start = { ...latlng, label };
   state.startMarker = setMarker(state.startMarker, latlng, `출발: ${label}`);
   $('start-label').textContent = `${label} (${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)})`;
-  maybeRoute();
+  updateCalcButtonState();
 }
 function setEnd(latlng, label) {
   state.end = { ...latlng, label };
   state.endMarker = setMarker(state.endMarker, latlng, `도착: ${label}`);
   $('end-label').textContent = `${label} (${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)})`;
-  maybeRoute();
+  updateCalcButtonState();
 }
-function maybeRoute() {
-  if (state.start && state.end) requestRoute();
-}
-$('vehicle').onchange = hourSel.onchange = maybeRoute;
+
+$('calc').onclick = () => {
+  if (!(state.start && state.end)) {
+    $('status').textContent = '출발지와 도착지를 먼저 지정하세요.';
+    return;
+  }
+  requestRoute();
+};
 
 $('reset').onclick = () => {
   for (const l of [...state.routeLines, state.startMarker, state.endMarker]) {
@@ -289,6 +354,7 @@ $('reset').onclick = () => {
   $('results').hidden = true;
   $('warnings').innerHTML = '';
   $('status').textContent = '';
+  updateCalcButtonState();
   map.setView(DEFAULT_CENTER, 14);
 };
 
@@ -308,10 +374,11 @@ async function requestRoute() {
   state.routeLines.forEach(l => map.removeLayer(l));
   state.routeLines = [];
   $('status').textContent = '경로 계산 중…';
+  const depart = getDepartInfo();
   const q = new URLSearchParams({
     start_lat: state.start.lat, start_lon: state.start.lng,
     end_lat: state.end.lat, end_lon: state.end.lng,
-    hour: hourSel.value, vehicle: $('vehicle').value,
+    hour: depart.hour, is_weekend: depart.isWeekend, vehicle: $('vehicle').value,
   });
   const resp = await fetch(`/api/route?${q}`);
   if (!resp.ok) {
@@ -319,10 +386,10 @@ async function requestRoute() {
     $('status').textContent = `오류: ${err.detail || resp.status}`;
     return;
   }
-  draw(await resp.json());
+  draw(await resp.json(), depart);
 }
 
-function draw(data) {
+function draw(data, depart) {
   const css = getComputedStyle(document.body);
   const toLatLngs = (r) => r.coordinates.map(c => [c.lat, c.lon]);
 
@@ -361,14 +428,16 @@ function draw(data) {
     $('glosa-card').hidden = true;
   }
 
-  $('view3d').href = '/3d?' + new URLSearchParams({
+  const routeQuery = new URLSearchParams({
     start_lat: state.start.lat, start_lon: state.start.lng,
     end_lat: state.end.lat, end_lon: state.end.lng,
-    hour: hourSel.value, vehicle: $('vehicle').value,
+    hour: data.hour, is_weekend: data.is_weekend, vehicle: $('vehicle').value,
   });
+  $('view3d').href = '/3d?' + routeQuery;
+  $('viewnav').href = '/nav?' + routeQuery;
 
   $('results').hidden = false;
-  $('status').textContent = `${data.vehicle.name} · ${data.hour}시 출발 기준`;
+  $('status').textContent = `${data.vehicle.name} · ${depart.label} 출발 기준`;
 }
 </script>
 </body>

@@ -82,7 +82,11 @@ class Graph:
 
     @classmethod
     def from_json(cls, path: Path) -> "Graph":
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Graph":
+        """`sample_data.build_grid_graph()` 등이 만드는 메모리상의 그래프 dict를 로드한다."""
         graph = cls()
         for node_id, attrs in raw["nodes"].items():
             graph.add_node(

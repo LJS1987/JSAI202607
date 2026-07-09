@@ -218,11 +218,8 @@ async def fetch_police_signal_timings(
     return timings
 
 
-def load_osm_graph(place: str, dem_path: str | None = None):
-    """OpenStreetMap 실도로망 로더 (osmnx 설치 시 사용 가능).
-
-    사용 예:
-        graph = load_osm_graph("Gangnam-gu, Seoul, South Korea")
+def _graph_from_osmnx(g, dem_path: str | None = None):
+    """osmnx `MultiDiGraph` → 내부 `Graph` 변환 (load_osm_graph* 공용 헬퍼).
 
     - 신호등: highway=traffic_signals 노드. 간선(primary 이상)이 지나는
       교차로는 "major", 나머지는 "minor" 신호로 분류한다.
@@ -230,17 +227,11 @@ def load_osm_graph(place: str, dem_path: str | None = None):
       osmnx 로 노드 고도를 채운다. 없으면 0 (평지 가정).
     - 일방통행은 osmnx 방향 그래프가 이미 반영한다.
     """
-    try:
-        import osmnx as ox
-    except ImportError as exc:
-        raise RuntimeError(
-            "실지도 로딩에는 osmnx 가 필요합니다: pip install osmnx"
-        ) from exc
+    import osmnx as ox
 
     from .graph import Graph, Node, Edge
     from .traffic import normalize_road_class
 
-    g = ox.graph_from_place(place, network_type="drive")
     if dem_path:
         g = ox.elevation.add_node_elevations_raster(g, dem_path)
 
@@ -282,6 +273,73 @@ def load_osm_graph(place: str, dem_path: str | None = None):
     for edge in edges:
         graph.add_edge(edge)
     return graph
+
+
+def load_osm_graph(place: str, dem_path: str | None = None):
+    """OpenStreetMap 실도로망 로더 (osmnx 설치 시 사용 가능), 지명 기준.
+
+    사용 예:
+        graph = load_osm_graph("Gangnam-gu, Seoul, South Korea")
+    """
+    try:
+        import osmnx as ox
+    except ImportError as exc:
+        raise RuntimeError(
+            "실지도 로딩에는 osmnx 가 필요합니다: pip install osmnx"
+        ) from exc
+
+    g = ox.graph_from_place(place, network_type="drive")
+    return _graph_from_osmnx(g, dem_path)
+
+
+# 장거리(highway_only=True) 요청용 도로 필터: 고속도로·간선급만 받아 Overpass
+# 쿼리·그래프 크기를 억제한다. 실제 장거리 주행도 대부분 이 등급 도로를 탄다.
+_HIGHWAY_ONLY_FILTER = (
+    '["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"]'
+)
+
+
+def load_osm_graph_bbox(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    dem_path: str | None = None,
+    timeout_s: float = 30.0,
+    highway_only: bool = False,
+):
+    """OpenStreetMap 실도로망 로더, 좌표 범위(bbox) 기준.
+
+    `/api/route`가 요청받은 출발/도착 지점 주변을 그때그때 내려받아 전국
+    어디서나 실도로망으로 경로를 계산할 수 있게 한다(main.get_graph_for_route
+    참고). 지명이 아니라 좌표라 강남 같은 특정 지역에 묶이지 않는다.
+
+    highway_only=True 면 이면도로를 빼고 고속도로·간선만 받는다 — bbox 가
+    넓어지는 장거리 요청에서 Overpass 쿼리·그래프 크기를 감당 가능한 수준으로
+    유지하기 위함(main.HIGHWAY_ONLY_THRESHOLD_KM 참고).
+
+    osmnx 미설치·네트워크 오류·Overpass 타임아웃 시 예외를 던지며,
+    호출부(main.get_graph_for_route)는 이를 잡아 합성 격자망으로 폴백한다.
+    """
+    try:
+        import osmnx as ox
+    except ImportError as exc:
+        raise RuntimeError(
+            "실지도 로딩에는 osmnx 가 필요합니다: pip install osmnx"
+        ) from exc
+
+    ox.settings.timeout = timeout_s
+    if highway_only:
+        g = ox.graph_from_bbox(
+            north=max_lat, south=min_lat, east=max_lon, west=min_lon,
+            custom_filter=_HIGHWAY_ONLY_FILTER,
+        )
+    else:
+        g = ox.graph_from_bbox(
+            north=max_lat, south=min_lat, east=max_lon, west=min_lon,
+            network_type="drive",
+        )
+    return _graph_from_osmnx(g, dem_path)
 
 
 def graph_to_json(graph) -> dict:

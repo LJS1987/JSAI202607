@@ -20,11 +20,19 @@ ROAD_CLASS_SPEED_KMH: dict[str, float] = {
 
 # 시간대별 혼잡 계수(자유류 속도에 곱함). 서울 도심 평일 패턴 근사:
 # 출근 07~09시, 퇴근 18~20시 정체, 심야 자유류.
-_HOURLY_FLOW_FACTOR: list[float] = [
+_HOURLY_FLOW_FACTOR_WEEKDAY: list[float] = [
     0.95, 0.98, 1.00, 1.00, 1.00, 0.95,  # 00-05
     0.85, 0.55, 0.50, 0.65, 0.75, 0.72,  # 06-11
     0.70, 0.72, 0.72, 0.70, 0.65, 0.55,  # 12-17
     0.45, 0.50, 0.65, 0.78, 0.85, 0.92,  # 18-23
+]
+
+# 주말 패턴 근사: 출퇴근 피크가 없고, 낮 시간대(나들이·쇼핑)에 완만한 정체.
+_HOURLY_FLOW_FACTOR_WEEKEND: list[float] = [
+    0.95, 0.97, 0.98, 0.98, 0.97, 0.95,  # 00-05
+    0.92, 0.88, 0.85, 0.80, 0.76, 0.72,  # 06-11
+    0.68, 0.65, 0.65, 0.66, 0.68, 0.70,  # 12-17
+    0.72, 0.76, 0.80, 0.85, 0.90, 0.93,  # 18-23
 ]
 
 # 고속도로는 신호가 없어 정체 시에도 상대적으로 흐름이 좋음
@@ -55,11 +63,12 @@ def normalize_road_class(road_class: str) -> str:
     return "tertiary"
 
 
-def expected_speed_ms(road_class: str, hour: int) -> float:
-    """도로 등급과 출발 시각(시)에 따른 기대 주행 속도(m/s)."""
+def expected_speed_ms(road_class: str, hour: int, is_weekend: bool = False) -> float:
+    """도로 등급과 출발 시각(시)·평일/주말 여부에 따른 기대 주행 속도(m/s)."""
     road_class = normalize_road_class(road_class)
     base_kmh = ROAD_CLASS_SPEED_KMH.get(road_class, 40.0)
-    factor = _HOURLY_FLOW_FACTOR[hour % 24]
+    profile = _HOURLY_FLOW_FACTOR_WEEKEND if is_weekend else _HOURLY_FLOW_FACTOR_WEEKDAY
+    factor = profile[hour % 24]
     if road_class == "motorway":
         factor = max(factor, _MOTORWAY_FLOOR)
     return base_kmh * factor / 3.6

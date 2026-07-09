@@ -60,6 +60,7 @@ def _edge_metrics(
     hour: int,
     signals: SignalSimulator | None = None,
     t_depart_s: float = 0.0,
+    is_weekend: bool = False,
 ) -> tuple[float, float, float, float]:
     """엣지 하나의 (에너지 Wh, 시간 s, 속도 m/s, 대기 s).
 
@@ -68,7 +69,7 @@ def _edge_metrics(
     """
     u = graph.nodes[edge.from_id]
     v = graph.nodes[edge.to_id]
-    speed = expected_speed_ms(edge.road_class, hour)
+    speed = expected_speed_ms(edge.road_class, hour, is_weekend)
 
     energy = edge_energy_wh(vehicle, edge.length_m, v.elev_m - u.elev_m, speed)
     drive_s = edge.length_m / speed
@@ -99,6 +100,7 @@ def find_route(
     mode: str,
     signals: SignalSimulator | None = None,
     depart_s: float | None = None,
+    is_weekend: bool = False,
 ) -> RouteResult:
     """mode="eco"(전비 최적) 또는 "fastest"(최소 시간) 경로 탐색."""
     if start_id not in graph.nodes or goal_id not in graph.nodes:
@@ -108,7 +110,7 @@ def find_route(
     def cost_of(edge: Edge, t_depart: float) -> tuple[float, float]:
         """(탐색 비용, 소요 시간). 전비 모드는 전위 보정 에너지."""
         energy, time_s, _, _ = _edge_metrics(
-            graph, vehicle, edge, hour, signals, t_depart
+            graph, vehicle, edge, hour, signals, t_depart, is_weekend
         )
         if mode == "fastest":
             return time_s, time_s
@@ -158,7 +160,7 @@ def find_route(
     t = t0
     for edge in edges:
         energy, time_s, speed, wait_s = _edge_metrics(
-            graph, vehicle, edge, hour, signals, t
+            graph, vehicle, edge, hour, signals, t, is_weekend
         )
         legs.append(
             RouteLeg(
